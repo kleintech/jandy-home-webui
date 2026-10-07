@@ -412,7 +412,9 @@ dialog.sheet::backdrop { background: rgba(2, 6, 12, .5); }
   grid-template-columns: 1fr 1fr;
   gap: 12px;
 }
-.temp-right { text-align: right; }
+/* Each label sits centered over its own number; the columns hug the card edges. */
+.temp { display: flex; flex-direction: column; align-items: center; justify-self: start; }
+.temp-right { justify-self: end; }
 .temp-label {
   display: block;
   font-size: 14px;
@@ -444,6 +446,9 @@ dialog.sheet::backdrop { background: rgba(2, 6, 12, .5); }
   font-weight: 700;
 }
 .card > .subhead:first-child { margin-top: 2px; }
+/* Same size as the toggle titles (Light, Bubbles, ...). */
+.subhead.set-head { font-size: 18px; font-weight: 600; }
+.light-note { margin: 2px 2px 0; font-size: 13px; color: var(--muted); }
 /* Water/Air readings head the Function card, above the mode switcher. */
 .temps + .segmented { margin-top: 14px; }
 /* Set points. Phones: the number(s) sit above a full-width bar (Heat left,
@@ -662,3 +667,5 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px colo
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation-duration: 2s !important; }
 }
+/* "Light Color" wraps onto two lines on narrow phones instead of truncating. */
+.light-row .color-btn .toggle-label { white-space: normal; overflow: visible; line-height: 1.15; }

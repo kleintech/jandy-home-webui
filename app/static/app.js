@@ -31,6 +31,7 @@
     busy: $('busy'),
     busyText: $('busy-text'),
     lightBlock: $('light-block'),
+    lightNote: $('light-note'),
     light: $('t-light'),
     colorBtn: $('light-color'),
     colorSwatch: $('light-swatch'),
@@ -691,6 +692,7 @@
     // light
     const light = state.light || {};
     el.lightBlock.hidden = light.available === false;
+    el.lightNote.hidden = light.available === false || !light.cycles;
     renderToggle(el.light, view('light.on'), { enabled: connected, pending: isPending('light') });
     const colors = Array.isArray(light.colors) ? light.colors : [];
     const color = view('light.color') || 'White';

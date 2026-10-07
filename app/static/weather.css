@@ -72,6 +72,37 @@
   font-size: 15px;
   line-height: 1.4;
 }
+/* Swim comfort note: tinted row under the summary. Tone color sits on the icon and
+   left rule only; text stays --text for contrast. */
+.wx-swim {
+  --swim: var(--cool, #0077b6);
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--swim);
+  border-radius: 8px;
+  background: var(--swim-bg, rgba(0, 119, 182, .08));
+  font-size: 15px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.wx-swim.good  { --swim: var(--ok, #16a34a);   --swim-bg: rgba(22, 163, 74, .09); }
+.wx-swim.fair  { --swim: var(--warn, #d97706); --swim-bg: rgba(217, 119, 6, .09); }
+.wx-swim.cold  { --swim: var(--cool, #0077b6); --swim-bg: rgba(0, 119, 182, .08); }
+.wx-swim.storm { --swim: var(--bad, #dc2626);  --swim-bg: rgba(220, 38, 38, .09); }
+.wx-swim-icon { flex: none; width: 16px; height: 16px; margin-top: 2px; color: var(--swim); }
+.wx-swim-icon svg { display: block; width: 100%; height: 100%; }
+.wx-swim-text { min-width: 0; }
+.wx-swim strong { font-weight: 700; }
+@media (prefers-color-scheme: dark) {
+  .wx-swim.good  { --swim-bg: rgba(52, 211, 153, .1); }
+  .wx-swim.fair  { --swim-bg: rgba(251, 191, 36, .1); }
+  .wx-swim.cold  { --swim-bg: rgba(76, 194, 255, .1); }
+  .wx-swim.storm { --swim-bg: rgba(248, 113, 113, .12); }
+}
+
 .wx-stale { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 
 .wx-legend {

@@ -1,7 +1,8 @@
 """Short-range weather for the guest page (Open-Meteo, no API key).
 
 `GET /api/weather` returns current conditions, the next ~6 hours of temperature,
-rain chance, cloud cover and humidity, and a one-line summary. Data is fetched lazily on
+rain chance, cloud cover and humidity, a one-line summary, and a one-line swim
+comfort note (`swim`, from app.comfort) that also uses the pool's water temperature. Data is fetched lazily on
 request, cached for 10 minutes, and the last good response is served if a refresh
 fails. Nothing here touches the pool controller; a weather failure only ever
 produces ``{"available": false}`` or a stale payload.
@@ -19,8 +20,10 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
+from .comfort import swim_comfort
+
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 log = logging.getLogger(__name__)
@@ -375,6 +378,7 @@ def build_payload(raw: dict[str, Any], cfg: Config, now: datetime,
                 "precip_prob": r["precip_prob"],
                 "cloud_cover": r["cloud_cover"],
                 "humidity": r.get("humidity"),
+                "code": r.get("code"),
             }
             for r in rows
         ],
@@ -480,7 +484,42 @@ def get_service() -> WeatherService:
     return _service
 
 
+def pool_water_f(request: Request) -> float | None:
+    """The pool's water temperature in °F from the pool service's last snapshot, or
+    None (no service, controller offline, pump off / sensor blank, implausible value).
+    Reads only what the page's own /api/state polls already keep fresh; never polls."""
+    svc = getattr(request.app.state, "svc", None)
+    snap = getattr(svc, "snap", None)
+    if snap is None or not getattr(snap, "connected", False):
+        return None
+    t = _num(getattr(snap, "pool_temp", None))
+    if t is None:
+        return None
+    if str(getattr(snap, "unit", "F")).upper().startswith("C"):
+        t = t * 9 / 5 + 32
+    return t if 33 <= t <= 110 else None
+
+
+def add_swim(data: dict[str, Any], water_f: float | None) -> dict[str, Any]:
+    """Attach the swim comfort note to an available payload. Never raises: on any
+    error the payload is returned without `swim`, so weather still shows."""
+    if not data.get("available"):
+        return data
+    try:
+        cur = data.get("current") or {}
+        swim = swim_comfort(water_f, cur, data.get("hourly") or [], cur.get("is_day"))
+    except Exception as exc:  # noqa: BLE001 - comfort must never break weather
+        log.warning("swim comfort failed: %s", exc)
+        return data
+    return dict(data, swim=swim) if swim else data
+
+
 @router.get("/api/weather")
-async def weather():
+async def weather(request: Request):
     data = await get_service().get()
-    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+    try:
+        water = pool_water_f(request)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pool temp unavailable for swim comfort: %s", exc)
+        water = None
+    return JSONResponse(add_swim(data, water), headers={"Cache-Control": "no-store"})

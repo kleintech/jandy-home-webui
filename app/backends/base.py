@@ -46,6 +46,8 @@ class Snapshot:
     light_on: bool = False
     light_color: str | None = None
     light_colors: list[str] = field(default_factory=list)
+    # Lights that change color by power-cycling (Jandy/Pentair/Hayward on a relay).
+    light_cycles: bool = False
 
 
 class BackendError(Exception):

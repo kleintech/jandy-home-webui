@@ -99,6 +99,45 @@
     return ICONS[k] || ICONS.cloudy;
   }
 
+  // ------------------------------------------------------------------ swim note
+  // One sentence from the server ("Great for swimming: 84° water, sunny and calm.").
+  // The rating word is bold and the icon shape differs by tone, so color is never
+  // the only cue. Absent or malformed -> no line at all.
+
+  var SWIM_ICONS = {
+    good: '<path d="M2 9c2 0 2-1.6 4-1.6S8 9 10 9s2-1.6 4-1.6M2 13.5c2 0 2-1.6 4-1.6s2 1.6 4 1.6 2-1.6 4-1.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="11.5" cy="3.6" r="1.8" fill="currentColor"/>',
+    fair: '<path d="M2 7.5c2 0 2-1.6 4-1.6s2 1.6 4 1.6 2-1.6 4-1.6M2 12c2 0 2-1.6 4-1.6s2 1.6 4 1.6 2-1.6 4-1.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+    cold: '<path d="M8 1.5v13M2.4 4.75l11.2 6.5M2.4 11.25l11.2-6.5M6 2.8l2 1.4 2-1.4M6 13.2l2-1.4 2 1.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+    storm: '<path d="M9.5 1 3.5 9h4l-1.5 6 6.5-8.5h-4.2L10 1z" fill="currentColor"/>'
+  };
+
+  function swimTone(s) {
+    if (s.rating === "Storms") return "storm";
+    var lv = num(s.level);
+    if (lv == null) return "fair";
+    return lv >= 3 ? "good" : lv === 2 ? "fair" : "cold";
+  }
+
+  function swimLine(s) {
+    if (!s || typeof s.text !== "string" || !s.text) return null;
+    var tone = swimTone(s);
+    var p = el("p", "wx-swim " + tone);
+    var ic = el("span", "wx-swim-icon");
+    ic.setAttribute("aria-hidden", "true");
+    ic.innerHTML = '<svg viewBox="0 0 16 16">' + SWIM_ICONS[tone] + "</svg>";
+    p.appendChild(ic);
+    var body = el("span", "wx-swim-text");
+    var r = typeof s.rating === "string" ? s.rating : "";
+    if (r && s.text.indexOf(r) === 0) {
+      body.appendChild(el("strong", null, r));
+      body.appendChild(document.createTextNode(s.text.slice(r.length)));
+    } else {
+      body.textContent = s.text;
+    }
+    p.appendChild(body);
+    return p;
+  }
+
   // ------------------------------------------------------------------ render
 
   function render() {
@@ -133,6 +172,8 @@
     root.appendChild(now);
 
     if (d.summary) root.appendChild(el("p", "wx-summary", d.summary));
+    var swim = swimLine(d.swim);
+    if (swim) root.appendChild(swim);
     if (d.stale && d.updated_at) root.appendChild(el("p", "wx-stale", "Forecast as of " + clock(d.updated_at, true)));
 
     var legend = el("ul", "wx-legend");

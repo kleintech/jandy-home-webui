@@ -32,6 +32,7 @@ class MockBackend:
             light_available=True,
             light_color="White",
             light_colors=list(COLORS),
+            light_cycles=True,
         )
 
     async def _wait(self) -> None:

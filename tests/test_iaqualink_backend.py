@@ -426,3 +426,22 @@ def test_wrong_serial_message_masks_serials():
             await b.start()
         assert "ABCDEFGH1234" not in str(e.value) and "1234" in str(e.value)
     run(go())
+
+
+def test_cycling_note_only_for_relay_color_lights(client):
+    # Bug: "light may cycle on and off" shown for ICL lights (which change color
+    # without power-cycling), or never shown for relay color lights.
+    assert client.get("/api/state").json()["light"]["cycles"] is False  # fixture: ICL zone
+
+    async def go():
+        c = FakeCloud()
+        dev = next(x for x in c.devs["devices_screen"] if "aux_1" in x)["aux_1"]
+        for a in dev:
+            if "type" in a:
+                a["type"] = "2"     # color light on a relay
+            if "subtype" in a:
+                a["subtype"] = "4"  # Jandy LED WaterColors
+        s = await svc_for(c, light="aux_1")
+        return s.state()["light"]["cycles"]
+
+    assert run(go()) is True

@@ -465,3 +465,106 @@ class TestHumidity:
         assert r.status_code == 200
         hum = [h["humidity"] for h in r.json()["hourly"]]
         assert None in hum and 70 in hum
+
+
+# ---------------------------------------------------------------- swim comfort
+
+class _Svc:
+    """Stand-in for app.state.svc: only `.snap` is read by the weather route."""
+
+    def __init__(self, **snap):
+        from app.backends.base import Snapshot
+        self.snap = Snapshot(**snap)
+
+
+def _swim_app(monkeypatch, raw, svc=None):
+    monkeypatch.setattr(weather, "_service",
+                        WeatherService(CFG, fetcher=Fetcher(raw), clock=Clock()))
+    app = FastAPI()
+    app.include_router(weather.router)
+    if svc is not None:
+        app.state.svc = svc
+    return TestClient(app)
+
+
+class TestSwimRoute:
+    def test_uses_connected_pool_temp(self, monkeypatch, raw):
+        # Bug: the route never reads the pool snapshot, so the note ignores the water.
+        c = _swim_app(monkeypatch, raw, _Svc(connected=True, pool_temp=84))
+        swim = c.get("/api/weather").json()["swim"]
+        assert "84° water" in swim["text"]
+        assert swim["rating"] in ("Cold", "Chilly", "Fair", "Good", "Great", "Perfect")
+        assert isinstance(swim["level"], int)
+
+    def test_disconnected_controller_means_no_water_temp(self, monkeypatch, raw):
+        # Bug: a stale pool_temp from before the controller dropped is presented as live.
+        c = _swim_app(monkeypatch, raw, _Svc(connected=False, pool_temp=84))
+        swim = c.get("/api/weather").json()["swim"]
+        assert "84° water" not in swim["text"]
+        assert "water temp shows when the pump is running" in swim["text"]
+
+    def test_pump_off_blank_pool_temp(self, monkeypatch, raw):
+        # Bug: pool_temp None (pump off / spa mode) crashes or prints "None°".
+        c = _swim_app(monkeypatch, raw, _Svc(connected=True, pool_temp=None, spa_mode=True))
+        swim = c.get("/api/weather").json()["swim"]
+        assert "None" not in swim["text"]
+        assert "water temp shows" in swim["text"]
+
+    def test_no_pool_service_on_app_still_serves_weather(self, monkeypatch, raw):
+        # Bug: AttributeError on app.state.svc (weather-only app, startup race) -> 500.
+        r = _swim_app(monkeypatch, raw).get("/api/weather")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["available"] is True and "water temp shows" in body["swim"]["text"]
+
+    def test_celsius_panel_is_converted(self, monkeypatch, raw):
+        # Bug: a °C panel's 29 is read as 29°F water ("cold").
+        c = _swim_app(monkeypatch, raw, _Svc(connected=True, pool_temp=29, unit="C"))
+        assert "84° water" in c.get("/api/weather").json()["swim"]["text"]
+
+    def test_comfort_error_never_breaks_weather(self, monkeypatch, raw):
+        # Bug: an exception in the comfort code turns the whole weather card into a 500.
+        def boom(*a, **k):
+            raise RuntimeError("bad comfort")
+        monkeypatch.setattr(weather, "swim_comfort", boom)
+        r = _swim_app(monkeypatch, raw, _Svc(connected=True, pool_temp=84)).get("/api/weather")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["available"] is True and "summary" in body and "swim" not in body
+
+    def test_broken_svc_object_never_breaks_weather(self, monkeypatch, raw):
+        # Bug: an unexpected service shape (snap property raising) surfaces as a 500.
+        class Broken:
+            @property
+            def snap(self):
+                raise RuntimeError("no snapshot")
+        r = _swim_app(monkeypatch, raw, Broken()).get("/api/weather")
+        assert r.status_code == 200 and r.json()["available"] is True
+
+    def test_unavailable_weather_has_no_swim(self, monkeypatch, raw):
+        # Bug: a swim note computed from nothing when the weather is off.
+        f = Fetcher(raw)
+        f.fail = True
+        monkeypatch.setattr(weather, "_service", WeatherService(CFG, fetcher=f, clock=Clock()))
+        app = FastAPI()
+        app.include_router(weather.router)
+        app.state.svc = _Svc(connected=True, pool_temp=84)
+        assert TestClient(app).get("/api/weather").json() == {"available": False}
+
+    def test_hourly_rows_carry_weather_code_for_storm_detection(self, raw):
+        # Bug: forecast rows lack the WMO code, so upcoming thunderstorms can never
+        # trigger the "Storms" note.
+        p = payload(raw)
+        assert all("code" in h for h in p["hourly"])
+        assert all(isinstance(h["code"], int) for h in p["hourly"])
+
+    def test_real_app_wires_pool_service(self, monkeypatch, raw):
+        # Bug: create_app's service isn't the one the weather route reads (mock pool 84°).
+        monkeypatch.setenv("JANDY_BACKEND", "mock")
+        monkeypatch.setattr(weather, "_service",
+                            WeatherService(CFG, fetcher=Fetcher(raw), clock=Clock()))
+        from app.main import create_app
+        with TestClient(create_app()) as c:
+            c.get("/api/state")
+            swim = c.get("/api/weather").json()["swim"]
+        assert "84° water" in swim["text"]

@@ -162,6 +162,7 @@ class PoolService:
                 # next guest who switches it on gets white unless they pick otherwise.
                 "color": (s.light_color or DEFAULT_COLOR) if s.light_on else DEFAULT_COLOR,
                 "colors": s.light_colors,
+                "cycles": s.light_cycles,
             },
             "spa": {
                 "current_temp": s.spa_temp,

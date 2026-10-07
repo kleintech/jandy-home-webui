@@ -21,7 +21,7 @@ from iaqualink.client import AqualinkClient
 from iaqualink.device import AqualinkLight, AqualinkNumber, AqualinkSensor, AqualinkSwitch
 from iaqualink.exception import AqualinkException, AqualinkServiceUnauthorizedException
 from iaqualink.system import SystemStatus
-from iaqualink.systems.iaqua.device import IaquaIclLight
+from iaqualink.systems.iaqua.device import IaquaColorLight, IaquaIclLight
 
 from .base import BackendError, Snapshot, StaleData, Switch
 
@@ -287,6 +287,8 @@ class IAqualinkBackend:
             light_on=light_on,
             light_color=self._light_effect,
             light_colors=self._colors(light),
+            # Relay color lights pick a color by switching power on and off; ICL zones don't.
+            light_cycles=isinstance(light, IaquaColorLight),
         )
 
     async def set_switch(self, name: Switch, on: bool) -> None:
