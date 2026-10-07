@@ -149,7 +149,11 @@
 
   // Screen-reader table of the same series (the chart itself is role="img").
   function table(rows) {
-    var tbl = el("table", "wx-sr");
+    // Visually hidden via a wrapper div: a <table> ignores width:1px and would
+    // widen the page on narrow phones.
+    var wrap = el("div", "wx-sr");
+    var tbl = el("table");
+    wrap.appendChild(tbl);
     tbl.appendChild(el("caption", null, "Forecast, next 6 hours"));
     var hr = el("tr");
     ["Time", "Temp", "Rain chance", "Cloud cover"].forEach(function (h) { hr.appendChild(el("th", null, h)); });
@@ -162,7 +166,7 @@
       });
       tbl.appendChild(tr);
     });
-    return tbl;
+    return wrap;
   }
 
   function ariaSummary(rows) {
@@ -325,6 +329,7 @@
     host.onpointerdown = function (e) { show(nearest(e.clientX)); };
     host.onpointerleave = hide;
     host.tabIndex = 0;
+    host.setAttribute("role", "group");
     host.setAttribute("aria-label", "Forecast chart. Use left and right arrow keys to read values.");
     host.onkeydown = function (e) {
       if (e.key === "ArrowRight" || e.key === "ArrowLeft") {

@@ -51,7 +51,7 @@ def limits_from_env() -> Limits:
         return int(os.environ.get(name, default))
 
     d = Limits()
-    return Limits(
+    lim = Limits(
         spa_min=i("SPA_MIN", d.spa_min),
         spa_max=i("SPA_MAX", d.spa_max),
         pool_heat_min=i("POOL_HEAT_MIN", d.pool_heat_min),
@@ -59,6 +59,20 @@ def limits_from_env() -> Limits:
         pool_chill_max=i("POOL_CHILL_MAX", d.pool_chill_max),
         min_spread=i("POOL_MIN_SPREAD", d.min_spread),
     )
+    # Fail fast: inverted limits would make every set point request fail, and a
+    # negative spread would let chill drop below heat.
+    problems = [
+        msg for bad, msg in [
+            (lim.spa_min > lim.spa_max, "SPA_MIN > SPA_MAX"),
+            (lim.min_spread < 0, "POOL_MIN_SPREAD < 0"),
+            (lim.pool_heat_min > lim.pool_heat_max, "POOL_HEAT_MIN > POOL_HEAT_MAX"),
+            (lim.pool_heat_min + lim.min_spread > lim.pool_chill_max,
+             "POOL_HEAT_MIN + POOL_MIN_SPREAD > POOL_CHILL_MAX"),
+        ] if bad
+    ]
+    if problems:
+        raise SystemExit("invalid limits: " + "; ".join(problems))
+    return lim
 
 
 def create_app(service: PoolService | None = None) -> FastAPI:
@@ -136,4 +150,6 @@ def create_app(service: PoolService | None = None) -> FastAPI:
 
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+# httpx logs every request URL at INFO; iAqualink URLs carry the session ID.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 app = create_app()

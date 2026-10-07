@@ -275,6 +275,9 @@ body.offline main { opacity: .6; }
   margin-top: 12px;
 }
 .light-row .toggle { grid-column: 1 / -1; grid-row: 1; }
+/* Grid items default to min-width:auto; let long labels ellipsize instead of
+   widening the card past the screen. */
+main > * { min-width: 0; }
 .color-dot {
   grid-column: 2;
   grid-row: 1;
@@ -282,12 +285,14 @@ body.offline main { opacity: .6; }
   z-index: 1;
   display: grid;
   place-items: center;
-  width: 52px;
-  height: 52px;
-  margin: 1px 68px 0 0;   /* clear the 56px switch + gap */
+  /* Square hit box that reaches the switch, so a near-miss on the circle opens
+     the color sheet instead of toggling the light. */
+  width: 64px;
+  height: 56px;
+  margin: 0 56px 0 0;     /* the 56px switch */
   padding: 0;
   border: 0;
-  border-radius: 50%;
+  border-radius: 12px;
   background: transparent;
   cursor: pointer;
 }

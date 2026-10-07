@@ -15,7 +15,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
@@ -301,15 +301,25 @@ def build_payload(raw: dict[str, Any], cfg: Config, now: datetime,
                   fetched_at: datetime, stale: bool) -> dict[str, Any]:
     """Assemble the API response from a raw Open-Meteo response.
 
-    `now` is naive local time in the forecast timezone; `fetched_at` is aware.
-    Raises ValueError if the response is unusable.
+    `now` is aware (or naive wall time in the response's own offset); `fetched_at`
+    is aware. Raises ValueError if the response is unusable.
+
+    Open-Meteo stamps every row with ONE fixed UTC offset for the whole response
+    (`utc_offset_seconds`), even across a DST change, so rows are windowed in that
+    fixed offset and only converted to the real local zone for display.
     """
+    tz = ZoneInfo(cfg.tz)
+    offset = _num(raw.get("utc_offset_seconds"))
+    fixed = timezone(timedelta(seconds=offset)) if offset is not None else tz
+    if now.tzinfo is not None:
+        now = now.astimezone(fixed).replace(tzinfo=None)
     cur = raw.get("current")
     if not isinstance(cur, dict) or _num(cur.get("temperature_2m")) is None:
         raise ValueError("no current conditions")
     rows, step = select_window(raw, now)
     if not rows:
         raise ValueError("no forecast rows for the next 6 hours")
+    rows = [dict(r, dt=r["dt"].replace(tzinfo=fixed).astimezone(tz).replace(tzinfo=None)) for r in rows]
     is_day = cur.get("is_day") == 1
     desc, icon = describe(cur.get("weather_code"), is_day)
     current = {
@@ -323,7 +333,6 @@ def build_payload(raw: dict[str, Any], cfg: Config, now: datetime,
         "icon": icon,
         "is_day": is_day,
     }
-    tz = ZoneInfo(cfg.tz)
     return {
         "available": True,
         "location": cfg.label,
@@ -350,7 +359,9 @@ Fetcher = Callable[[Config], Awaitable[dict[str, Any]]]
 
 
 async def fetch_open_meteo(cfg: Config) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
+    # httpx's timeout is per read; bound the whole request so a trickling server
+    # can't hold the refresh lock.
+    async with asyncio.timeout(TIMEOUT_SECONDS + 2), httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
         r = await client.get(API_URL, params=cfg.params())
         r.raise_for_status()
         data = r.json()
@@ -373,8 +384,8 @@ class WeatherService:
         self._next_try = 0.0                    # epoch seconds; earliest next refresh
 
     def _now_local(self) -> datetime:
-        tz = ZoneInfo(self.cfg.tz)
-        return datetime.fromtimestamp(self._clock(), tz).replace(tzinfo=None)
+        # Aware; build_payload converts it into the response's own fixed offset.
+        return datetime.fromtimestamp(self._clock(), UTC)
 
     async def _refresh_if_due(self) -> None:
         if self._clock() < self._next_try:

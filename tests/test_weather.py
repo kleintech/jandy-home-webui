@@ -293,3 +293,27 @@ def test_route_returns_200_unavailable_on_failure(monkeypatch, raw):
     r = TestClient(app).get("/api/weather")
     assert r.status_code == 200
     assert r.json() == {"available": False}
+
+
+def test_dst_end_day_window_uses_response_fixed_offset(raw):
+    # Bug: Open-Meteo keeps one fixed offset (EDT, -4h) for the whole response even
+    # after DST ends; windowing in the DST-aware zone started the 6 h window an hour
+    # in the past and labelled every row an hour off on the change day.
+    import copy
+    from datetime import timedelta as td
+
+    shifted = copy.deepcopy(raw)
+    for key in ("hourly", "minutely_15"):
+        if key in shifted:
+            shifted[key]["time"] = [
+                (datetime.fromisoformat(t) + td(days=25)).strftime("%Y-%m-%dT%H:%M")
+                for t in shifted[key]["time"]
+            ]
+    # 18:00Z on 2026-11-01 is 13:00 EST, but 14:00 in the response's fixed -04:00.
+    now = datetime(2026, 11, 1, 18, 0, tzinfo=timezone.utc)
+    p = build_payload(shifted, Config(), now, now, False)
+    first = p["hourly"][0]
+    assert first["time"] == "2026-11-01T13:00-05:00"
+    key = "minutely_15" if "minutely_15" in shifted else "hourly"
+    i = shifted[key]["time"].index("2026-11-01T14:00")
+    assert first["temp_f"] == round(shifted[key]["temperature_2m"][i], 1)

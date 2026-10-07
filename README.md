@@ -16,6 +16,7 @@ uses), talking to the iAqualink cloud API with your iAqualink account.
 | **Light color** | the light's effect list. The panel's own white effect ("Alpine White" or "Cloud White") is shown as **White** |
 | **Spa Set Temp** | `spa_set_point`, capped at 103 |
 | **Pool Heat / Chill** | `pool_set_point` (heat, the low set point, left slider) / `pool_chill_set_point` (chill, the high one, right slider). Heat ≥ 82, chill ≤ 92, chill ≥ heat + 5 |
+| **Weather** | not the Jandy: [Open-Meteo](https://open-meteo.com) forecast for the next 6 h, cached 10 min; the card hides itself if the forecast is unavailable |
 | **Water Temp / Air Temp** | `spa_temp` or `pool_temp` (by mode) / `air_temp` |
 | **Bubbles** | `aux_2` |
 | **Water Features** | the device labelled **Aux V1** |
@@ -55,7 +56,12 @@ panel reported.
 | `POOL_HEAT_MIN` | `82` | lowest pool heat set point |
 | `POOL_CHILL_MAX` | `92` | highest pool chill set point |
 | `POOL_MIN_SPREAD` | `5` | chill stays at least this far above heat |
-| `POOL_HEAT_MAX` | `92` | only matters without a chiller (with one, heat ≤ chill max − spread) |
+| `POOL_HEAT_MAX` | `92` | highest heat set point; with a chiller heat is also capped at chill max − spread |
+
+The service refuses to start if the limits contradict each other (e.g. `POOL_HEAT_MIN + POOL_MIN_SPREAD > POOL_CHILL_MAX`).
+| `WEATHER_LAT` / `WEATHER_LON` | `34.3033` / `-77.8039` | weather location (zip 28411) |
+| `WEATHER_LABEL` | `Wilmington, NC` | shown on the weather card |
+| `WEATHER_TZ` | `America/New_York` | |
 | `PORT` | `8080` | (container) |
 | `LOG_LEVEL` | `INFO` | |
 | `MOCK_LATENCY` | `0` | seconds of fake delay per command, mock only |

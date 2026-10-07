@@ -184,3 +184,19 @@ def test_controller_down_is_reported_not_crashing():
         assert r.status_code == 200
         assert r.json()["connected"] is False
         assert c.post("/api/spa/bubbles", json={"on": True}).status_code == 502
+
+
+@pytest.mark.parametrize(
+    "env",
+    [{"POOL_MIN_SPREAD": "-3"}, {"POOL_HEAT_MIN": "95"}, {"POOL_MIN_SPREAD": "20"}, {"SPA_MIN": "110"}],
+    ids=["negative-spread", "heat-min-above-max", "spread-too-wide", "spa-inverted"],
+)
+def test_contradictory_limits_refuse_to_start(monkeypatch, env):
+    # Bug: inverted limits silently advertised impossible slider ranges (every set
+    # point rejected), and a negative spread let chill go below heat.
+    from app.main import limits_from_env
+
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    with pytest.raises(SystemExit):
+        limits_from_env()
