@@ -51,6 +51,11 @@ class BackendError(Exception):
     """A command the controller rejected or could not be reached for."""
 
 
+class StaleData(BackendError):
+    """The controller answered, but with data the library ignored; the previous
+    snapshot is still the best guess for display, but not safe to act on."""
+
+
 class Backend(Protocol):
     async def start(self) -> None: ...
 

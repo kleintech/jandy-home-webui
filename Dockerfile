@@ -2,7 +2,7 @@
 # Pool & Spa guest web UI. Listens on $PORT (8080), runs as uid 1000.
 ARG PYTHON_VERSION=3.14
 
-FROM ghcr.io/astral-sh/uv:0.9 AS uv
+FROM ghcr.io/astral-sh/uv:0.12 AS uv
 
 FROM python:${PYTHON_VERSION}-slim AS build
 COPY --from=uv /uv /usr/local/bin/uv
@@ -14,7 +14,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 FROM python:${PYTHON_VERSION}-slim AS runtime
-ENV PATH=/venv/bin:$PATH PYTHONUNBUFFERED=1 PORT=8080
+ENV PATH=/venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=8080
 COPY --from=build /venv /venv
 WORKDIR /srv
 COPY app ./app

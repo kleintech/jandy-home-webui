@@ -14,18 +14,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 
 from iaqualink.client import AqualinkClient
 from iaqualink.device import AqualinkLight, AqualinkNumber, AqualinkSensor, AqualinkSwitch
-from iaqualink.exception import AqualinkException
+from iaqualink.exception import AqualinkException, AqualinkServiceUnauthorizedException
 from iaqualink.system import SystemStatus
+from iaqualink.systems.iaqua.device import IaquaIclLight
 
-from .base import BackendError, Snapshot, Switch
+from .base import BackendError, Snapshot, StaleData, Switch
 
 log = logging.getLogger(__name__)
 
 WHITE = "White"
+# Anything the library or a malformed cloud reply can throw while talking to the API.
+CALL_ERRORS = (AqualinkException, TimeoutError, OSError, ValueError, KeyError, TypeError)
+# Wrong password: wait this long before logging in again, doubling up to the max, so a
+# bad Secret doesn't hammer the login endpoint every poll.
+LOGIN_BACKOFF = (60.0, 1800.0)
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,9 @@ class IAqualinkBackend:
         # A chill write blanks the value until the next poll; keep the last one.
         self._last_chill: int | None = None
         self._warned: set[str] = set()
+        self._stale = False
+        self._login_retry_at = 0.0
+        self._login_backoff = 0.0
 
     @classmethod
     def from_env(cls) -> IAqualinkBackend:
@@ -80,14 +90,23 @@ class IAqualinkBackend:
             await self._connect()
 
     async def _connect(self) -> None:
+        if time.monotonic() < self._login_retry_at:
+            raise BackendError("iAqualink rejected the username/password (waiting before retrying)")
         if self.client is None:
             self.client = AqualinkClient(self._username, self._password)
         try:
             async with asyncio.timeout(self.timeout):
                 await self.client.login()
                 systems = await self.client.get_systems()
-        except (AqualinkException, TimeoutError, OSError) as exc:
-            raise BackendError(f"login failed: {exc}") from exc
+        except AqualinkServiceUnauthorizedException as exc:
+            lo, hi = LOGIN_BACKOFF
+            self._login_backoff = min(hi, self._login_backoff * 2 or lo)
+            self._login_retry_at = time.monotonic() + self._login_backoff
+            log.error("iAqualink rejected the username/password; next try in %.0fs", self._login_backoff)
+            raise BackendError("iAqualink rejected the username/password") from exc
+        except CALL_ERRORS as exc:
+            raise BackendError(f"login failed: {exc or type(exc).__name__}") from exc
+        self._login_backoff = 0.0
         iaqua = {k: s for k, s in systems.items() if s.type == "iaqua"}
         if self.serial:
             self.system = iaqua.get(self.serial)
@@ -97,6 +116,54 @@ class IAqualinkBackend:
             found = ", ".join(f"{k} ({s.type})" for k, s in systems.items()) or "none"
             raise BackendError(f"no iaqua system on this account (found: {found})")
         log.info("using iAqualink system %s (%s)", self.system.name, self.system.type)
+        self._watch_parses(self.system)
+
+    def _watch_parses(self, system) -> None:
+        """Flag replies the library silently ignores.
+
+        The cloud sometimes answers with an empty `system_type`, a "NaN" aux state or
+        an Offline/Service screen; iaqualink-py then skips the update but keeps its old
+        device state, which looks current. Acting on it would send toggles the wrong
+        way, so remember that the last refresh was incomplete.
+        """
+
+        def wrap(name, is_bad):
+            orig = getattr(system, name)
+
+            def parse(response):
+                try:
+                    if is_bad(response.json()):
+                        self._stale = True
+                except Exception:
+                    self._stale = True
+                return orig(response)
+
+            setattr(system, name, parse)
+
+        def merged(items):
+            out: dict = {}
+            for x in items:
+                out.update(x)
+            return out
+
+        def home_bad(data):
+            home = merged(data["home_screen"])
+            return home.get("status") != "Online" or home.get("system_type") in ("", None)
+
+        def devices_bad(data):
+            screen = data["devices_screen"]
+            if screen[0].get("status") != "Online":
+                return True
+            return any(
+                attr.get("state") == "NaN" for x in screen[3:] for attr in next(iter(x.values()))
+            )
+
+        def onetouch_bad(data):
+            return merged(data["onetouch_screen"]).get("status") != "Online"
+
+        wrap("_parse_home_response", home_bad)
+        wrap("_parse_devices_response", devices_bad)
+        wrap("_parse_onetouch_response", onetouch_bad)
 
     async def close(self) -> None:
         if self.client is not None:
@@ -108,7 +175,7 @@ class IAqualinkBackend:
         try:
             async with asyncio.timeout(self.timeout):
                 return await coro_fn()
-        except (AqualinkException, TimeoutError, OSError) as exc:
+        except CALL_ERRORS as exc:
             raise BackendError(str(exc) or type(exc).__name__) from exc
 
     # ---- device lookup -------------------------------------------------------------
@@ -159,9 +226,12 @@ class IAqualinkBackend:
     async def refresh(self) -> Snapshot:
         if self.system is None:
             await self._connect()
+        self._stale = False
         await self._call(self.system.refresh)
         if self.system.status is not SystemStatus.ONLINE:
             return Snapshot(connected=False)
+        if self._stale:
+            raise StaleData("the controller sent an incomplete update")
 
         def on(ref: str) -> bool:
             dev = self._find(ref)
@@ -186,6 +256,10 @@ class IAqualinkBackend:
         light_on = bool(light and light.is_on)
         if not light_on:
             self._light_effect = None
+        elif isinstance(light, IaquaIclLight) and light.effect in (light.effect_list or []):
+            # ICL zones do report their color; aux color lights don't.
+            reported = light.effect
+            self._light_effect = WHITE if reported == self._white_effect(light) else reported
         unit = getattr(self.system, "temp_unit", None)
 
         return Snapshot(
@@ -225,6 +299,9 @@ class IAqualinkBackend:
         effect = self._white_effect(light) if color == WHITE else color
         if effect not in (light.effect_list or []):
             raise BackendError(f"unknown color {color!r}")
+        if isinstance(light, IaquaIclLight) and not light.is_on:
+            # An ICL zone has a separate on/off command; a color alone may not light it.
+            await self._call(light.turn_on)
         await self._call(lambda: light.set_effect(effect))
         self._light_effect = color
 
@@ -239,11 +316,25 @@ class IAqualinkBackend:
         heat_dev = devices.get("pool_set_point")
         if not isinstance(heat_dev, AqualinkNumber):
             raise BackendError("the controller has no pool set point")
-        if heat_dev.current_value != heat:
-            await self._call(lambda: heat_dev.set_value(heat))
-        if chill is not None:
-            chill_dev = devices.get("pool_chill_set_point")
-            if not isinstance(chill_dev, AqualinkNumber):
-                raise BackendError("the controller has no chill set point")
-            await self._call(lambda: chill_dev.set_value(chill))
-            self._last_chill = chill
+        chill_dev = devices.get("pool_chill_set_point")
+        if chill is not None and not isinstance(chill_dev, AqualinkNumber):
+            raise BackendError("the controller has no chill set point")
+
+        async def write_heat():
+            if heat_dev.current_value != heat:
+                await self._call(lambda: heat_dev.set_value(heat))
+
+        async def write_chill():
+            if chill is not None:
+                await self._call(lambda: chill_dev.set_value(chill))
+                self._last_chill = chill
+
+        # Order the two writes so the spread holds even if the second one fails:
+        # moving down, lower chill first; moving up, raise heat first.
+        current_heat = heat_dev.current_value
+        if current_heat is not None and heat < current_heat:
+            await write_chill()
+            await write_heat()
+        else:
+            await write_heat()
+            await write_chill()

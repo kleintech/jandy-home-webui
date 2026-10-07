@@ -92,6 +92,7 @@ async def make_backend(cloud: FakeCloud, **mapping) -> IAqualinkBackend:
     b = IAqualinkBackend("u", "p", DeviceMap(**mapping))
     b.client = cloud
     b.system = AqualinkSystem.from_data(cloud, {"device_type": "iaqua", "serial_number": "SN1", "name": "Pool"})
+    b._watch_parses(b.system)
     return b
 
 
@@ -192,3 +193,188 @@ def test_light_colors_present_white_first(client):
     colors = client.get("/api/state").json()["light"]["colors"]
     assert colors[0] == "White"
     assert "Alpine White" not in colors and "Off" not in colors
+
+
+# ---- regressions from the first adversarial review ---------------------------------
+
+import asyncio  # noqa: E402
+
+from iaqualink.exception import AqualinkServiceException, AqualinkServiceUnauthorizedException  # noqa: E402
+
+from app.backends.base import BackendError  # noqa: E402
+from app.service import RuleError  # noqa: E402
+
+
+async def svc_for(cloud, **mapping):
+    b = await make_backend(cloud, **mapping)
+    s = PoolService(b, poll_seconds=3600, stale_retry_seconds=0)
+    await s._refresh()
+    cloud.sent.clear()
+    return s
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def test_empty_system_type_refuses_instead_of_toggling_blind():
+    # Bug: library skips a home update with system_type "" but keeps old state; the
+    # spa (turned on at the panel) was toggled OFF while the heater went ON.
+    async def go():
+        c = FakeCloud()
+        s = await svc_for(c)
+        c._home("spa_pump")["spa_pump"] = "1"
+        c._home("system_type")["system_type"] = ""
+        with pytest.raises(BackendError):
+            await s.set_mode("spa")
+        assert commands(c) == []
+    run(go())
+
+
+def test_nan_device_state_cannot_let_spillover_and_water_features_both_on():
+    # Bug: a NaN aux made the library skip the devices update, so water features
+    # (on at the panel) looked off and spillover was switched on alongside it.
+    async def go():
+        c = FakeCloud()
+        s = await svc_for(c, spillover="Aux V2")
+        c._aux("aux_4")["state"] = "1"
+        c._aux("aux_6")["state"] = "NaN"
+        with pytest.raises(BackendError):
+            await s.set_spillover(True)
+        assert c._aux("aux_5")["state"] == "0"
+    run(go())
+
+
+def test_offline_controller_gets_no_commands():
+    # Bug: Offline status produced an all-off snapshot and commands were still sent.
+    async def go():
+        c = FakeCloud()
+        s = await svc_for(c)
+        c._home("status")["status"] = "Offline"
+        with pytest.raises(BackendError):
+            await s.set_mode("spa")
+        assert commands(c) == []
+    run(go())
+
+
+def test_setpoint_rules_use_fresh_state_not_offline_cache():
+    # Bug: service last saw the controller offline (no chill known) and let a
+    # heat-only 75 through, breaking the spread against chill 83 on the panel.
+    async def go():
+        c = FakeCloud()
+        s = PoolService(await make_backend(c), poll_seconds=3600)
+        c._home("status")["status"] = "Offline"
+        await s._refresh()
+        c._home("status")["status"] = "Online"
+        c.sent.clear()
+        with pytest.raises(RuleError):
+            await s.set_pool_setpoints(75, None)
+        assert commands(c) == []
+    run(go())
+
+
+def test_failed_chill_write_keeps_spread_when_lowering():
+    # Bug: heat written first; when the chill write then failed, 92/87 -> 87/87.
+    async def go():
+        c = FakeCloud()
+        s = await svc_for(c)
+        await s.set_pool_setpoints(92, 87)
+        orig = c.send_request
+
+        async def boom(url, method="get", **kw):
+            if "poolchillsetpointtemp" in (kw.get("params") or {}):
+                raise AqualinkServiceException("Unexpected response: 500")
+            return await orig(url, method, **kw)
+
+        c.send_request = boom
+        with pytest.raises(BackendError):
+            await s.set_pool_setpoints(87, 82)
+        heat = int(c._home("pool_set_point")["pool_set_point"])
+        chill = int(c._home("pool_chill_set_point")["pool_chill_set_point"])
+        assert heat - chill >= 5, (heat, chill)
+    run(go())
+
+
+def test_spa_mode_caps_existing_setpoint_before_heating():
+    # Bug: panel set point 104 (set outside the app) was heated to as-is.
+    async def go():
+        c = FakeCloud()
+        c._home("spa_set_point")["spa_set_point"] = "104"
+        s = await svc_for(c)
+        st = await s.set_mode("spa")
+        sent = commands(c)
+        assert sent.index("setpoint_hpm_temp") < sent.index("set_spa_heater")
+        assert st["spa"]["set_temp"] == 103
+    run(go())
+
+
+def test_non_json_reply_marks_disconnected_and_startup_survives():
+    # Bug: an HTML maintenance page raised JSONDecodeError: start() crashed (pod
+    # crash loop) and the poller kept showing stale data as connected.
+    async def go():
+        c = FakeCloud()
+
+        async def html(url, method="get", **kw):
+            return httpx.Response(200, text="<html>maintenance</html>", request=httpx.Request(method, url))
+
+        c.send_request = html
+        s = PoolService(await make_backend(c), poll_seconds=3600)
+        s.snap.connected = True
+        await s.start()
+        s._poller.cancel()
+        assert s.state()["connected"] is False
+    run(go())
+
+
+def test_double_tap_with_lagging_cloud_does_not_undo_itself():
+    # Bug: cloud still reported bubbles off after the first toggle, so the second
+    # "on" request toggled it back off.
+    async def go():
+        c = FakeCloud()
+        s = await svc_for(c)
+        stale = copy.deepcopy(c.devs)
+        orig = c.send_request
+
+        async def laggy(url, method="get", **kw):
+            r = await orig(url, method, **kw)
+            cmd = (kw.get("params") or {}).get("command", "")
+            if cmd == "get_devices" or cmd.startswith("set_aux"):
+                return httpx.Response(200, json=copy.deepcopy(stale), request=r.request)
+            return r
+
+        c.send_request = laggy
+        await asyncio.gather(s.set_bubbles(True), s.set_bubbles(True))
+        assert commands(c) == ["set_aux_2"]
+        assert c._aux("aux_2")["state"] == "1"
+    run(go())
+
+
+def test_icl_light_is_switched_on_before_color():
+    # Bug: an ICL zone that is off only got a color command, which may not light it.
+    async def go():
+        c = FakeCloud()
+        s = await svc_for(c)
+        await s.set_light(True)
+        sent = commands(c)
+        assert sent and sent[0] == "onoff_iclzone", sent
+        assert "set_iclzone_color" in sent
+    run(go())
+
+
+def test_bad_password_backs_off_instead_of_logging_in_every_poll():
+    # Bug: wrong credentials meant a login POST on every 15 s poll, risking lockout.
+    async def go():
+        b = IAqualinkBackend("u", "bad")
+        attempts = []
+
+        class Rejecting(AqualinkClient):
+            async def login(self):
+                attempts.append(1)
+                raise AqualinkServiceUnauthorizedException()
+
+        b.client = Rejecting("u", "bad")
+        for _ in range(3):
+            with pytest.raises(BackendError, match="username/password"):
+                await b.refresh()
+        assert len(attempts) == 1
+    run(go())

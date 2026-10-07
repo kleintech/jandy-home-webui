@@ -173,7 +173,7 @@
   const groups = {
     mode:    { label: 'switch mode',          keys: ['mode'],             req: () => ['/api/mode', { mode: view('mode') }] },
     light:   { label: 'change the light',     keys: ['light.on'],         req: () => ['/api/light', { on: !!view('light.on') }] },
-    color:   { label: 'change the light color', keys: ['light.color'],    req: () => ['/api/light/color', { color: view('light.color') }] },
+    color:   { label: 'change the light color', keys: ['light.color', 'light.on'], req: () => ['/api/light/color', { color: view('light.color') }] },
     spaSet:  { label: 'set the spa temperature', keys: ['spa.set_temp'],  req: () => ['/api/spa/setpoint', { set_temp: view('spa.set_temp') }] },
     bubbles: { label: 'change Bubbles',       keys: ['spa.bubbles'],      req: () => ['/api/spa/bubbles', { on: !!view('spa.bubbles') }] },
     poolSet: {
@@ -306,6 +306,7 @@
     const color = chip.dataset.color;
     if (color === view('light.color') && view('light.on')) return;
     overrides['light.color'] = color;
+    overrides['light.on'] = true;   // picking a color turns the light on server-side
     request('color', 0);
   });
 
@@ -318,12 +319,23 @@
       onInput(Number(input.value));
       render();
     });
-    input.addEventListener('change', () => {
-      if (!controlsEnabled()) return;
+    // Browsers skip `change` when the thumb is released where it started (or the
+    // input was disabled mid-drag), so end the drag on every way a gesture can end.
+    const end = () => {
+      if (!dragging.has(name) || !controlsEnabled()) return;
       dragging.delete(name);
       onInput(Number(input.value));
-      request(name, SLIDER_DEBOUNCE_MS);
-    });
+      const g = groups[name];
+      if (g.keys.every((k) => !(k in overrides) || overrides[k] === getPath(state, k))) {
+        clearOverrides(name);   // back where the server is: nothing to send
+        render();
+      } else {
+        request(name, SLIDER_DEBOUNCE_MS);
+      }
+    };
+    for (const ev of ['change', 'pointerup', 'pointercancel', 'touchend', 'touchcancel', 'blur']) {
+      input.addEventListener(ev, end);
+    }
   }
 
   bindSlider(el.spaSlider, 'spaSet', (v) => { overrides['spa.set_temp'] = v; });
@@ -443,6 +455,12 @@
   }
 
   function render() {
+    // A drag interrupted by the controls being disabled can't finish; drop it so its
+    // local values don't mask the server's forever.
+    if (dragging.size && !controlsEnabled()) {
+      for (const name of dragging) clearOverrides(name);
+      dragging.clear();
+    }
     if (!state) {
       el.conn.className = reachable ? 'dot' : 'dot bad';
       el.conn.setAttribute('aria-label', reachable ? 'Connecting' : 'Offline');

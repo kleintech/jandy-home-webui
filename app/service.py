@@ -9,15 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from .backends.base import Backend, BackendError, Snapshot, Switch
+from .backends.base import Backend, BackendError, Snapshot, StaleData, Switch
 
 log = logging.getLogger(__name__)
 
 DEFAULT_COLOR = "White"
+# After we switch something, the cloud can keep reporting the old state for a while.
+# Trust what we commanded for this long, so a second tap (or a second guest) doesn't
+# send the same toggle again and undo the first.
+SETTLE_SECONDS = 20.0
+# One retry when the controller sends an incomplete update just before a command.
+STALE_RETRY_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -35,8 +42,12 @@ class RuleError(Exception):
 
 
 class PoolService:
-    def __init__(self, backend: Backend, limits: Limits | None = None, poll_seconds: float = 15) -> None:
+    def __init__(self, backend: Backend, limits: Limits | None = None, poll_seconds: float = 15,
+                 settle_seconds: float = SETTLE_SECONDS, stale_retry_seconds: float = STALE_RETRY_SECONDS) -> None:
         self.backend = backend
+        self.settle_seconds = settle_seconds
+        self.stale_retry_seconds = stale_retry_seconds
+        self._commanded: dict[str, tuple[bool, float]] = {}
         self.limits = limits or Limits()
         self.poll_seconds = poll_seconds
         self.snap = Snapshot()
@@ -51,7 +62,7 @@ class PoolService:
         try:
             await self.backend.start()
             await self._refresh()
-        except BackendError as exc:
+        except Exception as exc:
             # Come up anyway; the poller keeps retrying and the UI shows "can't reach".
             log.warning("initial connect failed: %s", exc)
         self._poller = asyncio.create_task(self._poll_loop())
@@ -76,12 +87,29 @@ class PoolService:
 
     async def _refresh(self) -> Snapshot:
         try:
-            self.snap = await self.backend.refresh()
+            snap = await self.backend.refresh()
+        except StaleData:
+            raise  # keep showing the last good snapshot
         except BackendError:
             self.snap.connected = False
             raise
+        except Exception as exc:
+            self.snap.connected = False
+            raise BackendError(f"unexpected reply: {exc!r}") from exc
+        self.snap = self._overlay_commanded(snap)
         self.updated_at = datetime.now(UTC)
         return self.snap
+
+    def _overlay_commanded(self, snap: Snapshot) -> Snapshot:
+        now = time.monotonic()
+        changes = {}
+        for name, (on, at) in list(self._commanded.items()):
+            attr = "light_on" if name == "light" else name
+            if now - at > self.settle_seconds or getattr(snap, attr) == on:
+                del self._commanded[name]  # settled, or the controller caught up
+            else:
+                changes[attr] = on
+        return replace(snap, **changes) if changes else snap
 
     # ---- state ---------------------------------------------------------------------
 
@@ -133,18 +161,29 @@ class PoolService:
         current = getattr(self.snap, "light_on" if name == "light" else name)
         if current != on:
             await self.backend.set_switch(name, on)
+            self._commanded[name] = (on, time.monotonic())
+            setattr(self.snap, "light_on" if name == "light" else name, on)
 
     async def _run(self, action) -> dict[str, Any]:
         async with self._lock:
             # Decide from fresh state: a stale cache plus a toggle command would flip
             # something the wrong way.
-            await self._refresh()
+            try:
+                await self._refresh()
+            except StaleData:
+                await asyncio.sleep(self.stale_retry_seconds)
+                try:
+                    await self._refresh()
+                except StaleData as exc:
+                    raise BackendError("the controller isn't reporting its state right now; try again") from exc
+            if not self.snap.connected:
+                raise BackendError("the controller is offline")
             try:
                 await action()
             finally:
                 try:
                     await self._refresh()
-                except BackendError as exc:
+                except Exception as exc:
                     log.warning("refresh after command failed: %s", exc)
         return self.state()
 
@@ -159,6 +198,9 @@ class PoolService:
                     # Pump first: spa mode moves the valves, and the heater needs flow.
                     await self._ensure("filter_pump", True)
                     await self._ensure("spa_mode", True)
+                    # The guest cap applies to whatever is already on the panel too.
+                    if self.snap.spa_set is not None and self.snap.spa_set > self.limits.spa_max:
+                        await self.backend.set_spa_setpoint(self.limits.spa_max)
                     await self._ensure("spa_heater", True)
                 else:
                     await self._ensure("spa_heater", False)
@@ -171,17 +213,28 @@ class PoolService:
     async def set_light(self, on: bool) -> dict[str, Any]:
         async def action() -> None:
             if on and self.snap.light_colors and DEFAULT_COLOR in self.snap.light_colors:
+                if self._recently_commanded("light", True):
+                    return  # double tap; the first one is still taking effect
                 # Turning on always starts at white; picking a color is a separate step.
                 await self.backend.set_light_color(DEFAULT_COLOR)
+                self._commanded["light"] = (True, time.monotonic())
             else:
                 await self._ensure("light", on)
 
         return await self._run(action)
 
+    def _recently_commanded(self, name: str, on: bool) -> bool:
+        entry = self._commanded.get(name)
+        return bool(entry and entry[0] == on and time.monotonic() - entry[1] <= self.settle_seconds)
+
     async def set_light_color(self, color: str) -> dict[str, Any]:
-        if color not in self.snap.light_colors:
-            raise RuleError(f"unknown light color {color!r}")
-        return await self._run(lambda: self.backend.set_light_color(color))
+        async def action() -> None:
+            if color not in self.snap.light_colors:
+                raise RuleError(f"unknown light color {color!r}")
+            await self.backend.set_light_color(color)
+            self._commanded["light"] = (True, time.monotonic())
+
+        return await self._run(action)
 
     async def set_spa_setpoint(self, temp: int) -> dict[str, Any]:
         lim = self.limits
@@ -193,19 +246,24 @@ class PoolService:
         lim = self.limits
         if heat > lim.pool_heat_max:
             raise RuleError(f"pool heat set point can't exceed {lim.pool_heat_max}")
-        if self.snap.pool_chill_set is None:
-            if chill is not None:
-                raise RuleError("this controller has no chill set point")
-            if heat < lim.pool_heat_min:
-                raise RuleError(f"pool heat set point must be at least {lim.pool_heat_min}")
-        else:
-            if chill is None:
-                raise RuleError("chill_set is required")
-            if chill < lim.pool_chill_min:
-                raise RuleError(f"pool chill set point must be at least {lim.pool_chill_min}")
-            if heat - chill < lim.min_spread:
-                raise RuleError(f"heat must be at least {lim.min_spread} degrees above chill")
-        return await self._run(lambda: self.backend.set_pool_setpoints(heat, chill))
+
+        async def action() -> None:
+            # Checked against fresh state: whether there is a chiller decides the rules.
+            if self.snap.pool_chill_set is None:
+                if chill is not None:
+                    raise RuleError("this controller has no chill set point")
+                if heat < lim.pool_heat_min:
+                    raise RuleError(f"pool heat set point must be at least {lim.pool_heat_min}")
+            else:
+                if chill is None:
+                    raise RuleError("chill_set is required")
+                if chill < lim.pool_chill_min:
+                    raise RuleError(f"pool chill set point must be at least {lim.pool_chill_min}")
+                if heat - chill < lim.min_spread:
+                    raise RuleError(f"heat must be at least {lim.min_spread} degrees above chill")
+            await self.backend.set_pool_setpoints(heat, chill)
+
+        return await self._run(action)
 
     async def set_bubbles(self, on: bool) -> dict[str, Any]:
         return await self._run(lambda: self._ensure("bubbles", on))

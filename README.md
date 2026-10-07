@@ -24,7 +24,11 @@ The limits are enforced by the server, not just the sliders. Spillover and Water
 Features can't both be on: the server refuses to turn one on while the other is on.
 
 Jandy `set_*` commands are toggles, so the service refreshes state right before every
-command and only sends the ones that change something.
+command and only sends the ones that change something. It refuses to act (and asks the
+guest to try again) when the controller is offline or sends an incomplete update, and
+for 20 seconds after a command it trusts what it sent over a cloud that hasn't caught up.
+A wrong password is retried with backoff (1 minute, doubling to 30), not on every poll.
+Spa Mode also lowers a panel spa set point above 103 before turning the heater on.
 
 ### Mapping devices to your panel
 
@@ -32,8 +36,8 @@ Device names come from the panel's labels. If yours differ, set any of these
 (a device key such as `aux_3`, or a label, matched case-insensitively):
 
 `JANDY_FILTER_PUMP_DEVICE`, `JANDY_SPA_MODE_DEVICE`, `JANDY_SPA_HEATER_DEVICE`,
-`JANDY_BUBBLES_DEVICE`, `JANDY_WATER_FEATURES_DEVICE`, `JANDY_SPILLOVER_DEVICE`,
-`JANDY_LIGHT_DEVICE`.
+`JANDY_POOL_HEATER_DEVICE`, `JANDY_BUBBLES_DEVICE`, `JANDY_WATER_FEATURES_DEVICE`,
+`JANDY_SPILLOVER_DEVICE`, `JANDY_LIGHT_DEVICE`.
 
 When a configured device isn't found, the log lists every device key and label the
 panel reported.
@@ -51,6 +55,12 @@ panel reported.
 | `POOL_CHILL_MIN` | `82` | |
 | `POOL_MIN_SPREAD` | `5` | |
 | `POOL_HEAT_MIN` | `70` | only used when there is no chiller |
+| `PORT` | `8080` | (container) |
+| `LOG_LEVEL` | `INFO` | |
+| `MOCK_LATENCY` | `0` | seconds of fake delay per command, mock only |
+
+Temperatures and limits are in °F. A panel set to Celsius will refuse set point
+changes until the limits are set in °C.
 
 ## Development
 
@@ -74,25 +84,33 @@ the heat pump command `setpoint_hpm_temp`. Bump the pin on purpose, and rerun th
 
 ## Deploying to the lab k3s cluster
 
-The image is `registry.lab.kleincogroup.com/jandy-home-webui/pool:<git-sha>` and the
-site is `https://pool.lab.kleincogroup.com` (LAN only). Run one replica only: the pod
-serializes commands to the Jandy.
+The image is `registry.lab.kleincogroup.com/jandy-home-webui/pool:<git-sha>`. Run one
+replica only, because the pod serializes commands to the Jandy. The credentials Secret
+is never in git (this repo is public), so create it by hand in each namespace.
+
+Build and push:
 
 ```bash
 sha=$(git rev-parse HEAD)
 docker build -t registry.lab.kleincogroup.com/jandy-home-webui/pool:$sha .
 docker push registry.lab.kleincogroup.com/jandy-home-webui/pool:$sha
-(cd k8s && kustomize edit set image registry.lab.kleincogroup.com/jandy-home-webui/pool:$sha)
-
-kubectl create ns pool
-kubectl -n pool create secret generic iaqualink-credentials \
-  --from-literal=IAQUALINK_USERNAME='you@example.com' \
-  --from-literal=IAQUALINK_PASSWORD='…'
+sed -i -E "s/^([[:space:]]*newTag:).*/\1 $sha/" k8s/kustomization.yaml
 ```
 
-Then either `kubectl -n <ns> apply -k k8s/` for a dev deploy, or add an Argo CD
-Application in `kleintech/lab-k3s` pointing at this repo's `k8s/`. The credentials
-Secret is never in git (this repo is public); create it in the namespace by hand.
+**Dev** (throwaway; delete the namespace when done):
+
+```bash
+kubectl create ns dev-jandy-home-webui
+kubectl -n dev-jandy-home-webui create secret generic iaqualink-credentials \
+  --from-literal=IAQUALINK_USERNAME='you@example.com' --from-literal=IAQUALINK_PASSWORD='…'
+kubectl -n dev-jandy-home-webui apply -k k8s/
+# if prod already exists, move the dev Ingress to pool-dev.lab.kleincogroup.com (see the lab-k3s skill)
+```
+
+**Prod** (`https://pool.lab.kleincogroup.com`, LAN only, Argo CD): create the same Secret
+in namespace `pool`, commit the `newTag` bump to `main`, and add
+`argocd/apps/pool.yaml` to `kleintech/lab-k3s` (copied from its
+`templates/app/argocd-application.yaml`, pointing at this repo's `k8s/`).
 
 CI runs the tests on GitHub-hosted runners. It doesn't use the lab's self-hosted
 runners, because this repo is public.
