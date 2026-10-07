@@ -21,6 +21,8 @@ FIXTURE = Path(__file__).parent / "fixtures" / "weather" / "open_meteo.json"
 # 2026-10-07 17:50 UTC == 13:50 EDT, a few minutes after the fixture was recorded.
 NOW_UTC = datetime(2026, 10, 7, 17, 50, tzinfo=timezone.utc).timestamp()
 NOW_LOCAL = datetime(2026, 10, 7, 13, 50)
+# The fixture's location; the app itself has no built-in location.
+CFG = Config(lat=34.3033, lon=-77.8039, label="Wilmington, NC")
 
 
 @pytest.fixture
@@ -29,7 +31,7 @@ def raw():
 
 
 def payload(raw, now=NOW_LOCAL):
-    return build_payload(raw, Config(), now, datetime.now(timezone.utc), False)
+    return build_payload(raw, CFG, now, datetime.now(timezone.utc), False)
 
 
 def set_series(raw, key, var, values_by_time):
@@ -79,7 +81,7 @@ class TestWindow:
     def test_service_slices_in_forecast_timezone_not_utc(self, raw):
         # Bug: comparing the API's naive local times against UTC "now" shifts the
         # window 4 hours into the future (would start at 17:45 here).
-        svc = WeatherService(Config(), fetcher=Fetcher(raw), clock=Clock())
+        svc = WeatherService(CFG, fetcher=Fetcher(raw), clock=Clock())
         p = asyncio.run(svc.get())
         assert p["hourly"][0]["time"] == "2026-10-07T13:45-04:00"
 
@@ -184,7 +186,7 @@ class TestCache:
     def test_cached_for_ten_minutes_then_refreshed(self, raw):
         # Bug: every page load hits Open-Meteo, or the cache never expires.
         f, clock = Fetcher(raw), Clock()
-        svc = WeatherService(Config(), fetcher=f, clock=clock)
+        svc = WeatherService(CFG, fetcher=f, clock=clock)
         asyncio.run(svc.get())
         clock.t += 599
         asyncio.run(svc.get())
@@ -197,7 +199,7 @@ class TestCache:
         # Bug: a failed refresh wipes good data and the section disappears, or
         # stale data is passed off as fresh.
         f, clock = Fetcher(raw), Clock()
-        svc = WeatherService(Config(), fetcher=f, clock=clock)
+        svc = WeatherService(CFG, fetcher=f, clock=clock)
         first = asyncio.run(svc.get())
         f.fail = True
         clock.t += 15 * 60
@@ -212,7 +214,7 @@ class TestCache:
         # Bug: while Open-Meteo is down every request waits out the 8 s timeout.
         f, clock = Fetcher(raw), Clock()
         f.fail = True
-        svc = WeatherService(Config(), fetcher=f, clock=clock)
+        svc = WeatherService(CFG, fetcher=f, clock=clock)
         asyncio.run(svc.get())
         clock.t += 30
         asyncio.run(svc.get())
@@ -224,7 +226,7 @@ class TestCache:
     def test_bad_response_does_not_replace_good_data(self, raw):
         # Bug: a 200 with a garbage body overwrites the cache and the section vanishes.
         f, clock = Fetcher(raw), Clock()
-        svc = WeatherService(Config(), fetcher=f, clock=clock)
+        svc = WeatherService(CFG, fetcher=f, clock=clock)
         asyncio.run(svc.get())
         f.raw = {"error": True, "reason": "bad"}
         clock.t += 11 * 60
@@ -235,7 +237,7 @@ class TestCache:
         # Bug: once the cache expires, every page load queues behind a refresh that
         # can take the full 8 s timeout, even though good data is on hand.
         f, clock = Fetcher(raw), Clock()
-        svc = WeatherService(Config(), fetcher=f, clock=clock)
+        svc = WeatherService(CFG, fetcher=f, clock=clock)
         asyncio.run(svc.get())
         clock.t += 11 * 60
         f.delay = 1.0
@@ -253,14 +255,14 @@ class TestCache:
         # Bug: first-ever failure raises (500) or returns a half-built payload.
         f = Fetcher(raw)
         f.fail = True
-        svc = WeatherService(Config(), fetcher=f, clock=Clock())
+        svc = WeatherService(CFG, fetcher=f, clock=Clock())
         assert asyncio.run(svc.get()) == {"available": False}
 
     def test_concurrent_requests_share_one_fetch(self, raw):
         # Bug: a burst of page loads on a cold cache stampedes the API.
         f = Fetcher(raw)
         f.delay = 0.05
-        svc = WeatherService(Config(), fetcher=f, clock=Clock())
+        svc = WeatherService(CFG, fetcher=f, clock=Clock())
 
         async def burst():
             return await asyncio.gather(*(svc.get() for _ in range(5)))
@@ -272,22 +274,25 @@ class TestCache:
 
 # ---------------------------------------------------------------- config + route
 
-def test_env_overrides_and_bad_values_fall_back(monkeypatch):
-    # Bug: a typo in WEATHER_LAT / WEATHER_TZ crashes app startup.
+def test_env_overrides_and_bad_values_dont_crash(monkeypatch):
+    # Bug: a typo in WEATHER_LAT / WEATHER_TZ crashes app startup, or a half-valid
+    # location is used with a made-up other half.
+    monkeypatch.delenv("WEATHER_ZIP", raising=False)
     monkeypatch.setenv("WEATHER_LAT", "35.5")
     monkeypatch.setenv("WEATHER_LON", "not-a-number")
     monkeypatch.setenv("WEATHER_TZ", "Mars/Olympus")
     monkeypatch.setenv("WEATHER_LABEL", "Beach house")
+    assert Config.from_env() is None  # no valid location -> weather off
+    monkeypatch.setenv("WEATHER_LON", "-77.0")
     cfg = Config.from_env()
-    assert (cfg.lat, cfg.lon, cfg.tz, cfg.label) == (35.5, weather.DEFAULT_LON,
-                                                    weather.DEFAULT_TZ, "Beach house")
+    assert (cfg.lat, cfg.lon, cfg.tz, cfg.label) == (35.5, -77.0, weather.DEFAULT_TZ, "Beach house")
 
 
 def test_route_returns_200_unavailable_on_failure(monkeypatch, raw):
     # Bug: weather outage surfaces as a 5xx on the guest page.
     f = Fetcher(raw)
     f.fail = True
-    monkeypatch.setattr(weather, "_service", WeatherService(Config(), fetcher=f, clock=Clock()))
+    monkeypatch.setattr(weather, "_service", WeatherService(CFG, fetcher=f, clock=Clock()))
     app = FastAPI()
     app.include_router(weather.router)
     r = TestClient(app).get("/api/weather")
@@ -311,9 +316,61 @@ def test_dst_end_day_window_uses_response_fixed_offset(raw):
             ]
     # 18:00Z on 2026-11-01 is 13:00 EST, but 14:00 in the response's fixed -04:00.
     now = datetime(2026, 11, 1, 18, 0, tzinfo=timezone.utc)
-    p = build_payload(shifted, Config(), now, now, False)
+    p = build_payload(shifted, CFG, now, now, False)
     first = p["hourly"][0]
     assert first["time"] == "2026-11-01T13:00-05:00"
     key = "minutely_15" if "minutely_15" in shifted else "hourly"
     i = shifted[key]["time"].index("2026-11-01T14:00")
     assert first["temp_f"] == round(shifted[key]["temperature_2m"][i], 1)
+
+
+def test_no_location_configured_means_weather_off(monkeypatch):
+    # Bug: shipping the author's home location as a default for everyone who
+    # deploys this, or crashing when no location is set.
+    import asyncio
+
+    for k in ("WEATHER_LAT", "WEATHER_LON", "WEATHER_ZIP"):
+        monkeypatch.delenv(k, raising=False)
+    assert Config.from_env() is None
+
+    async def boom(cfg):
+        raise AssertionError("must not fetch without a location")
+
+    svc = WeatherService(None, fetcher=boom)
+    svc.cfg = None
+    assert asyncio.run(svc.get()) == {"available": False}
+
+
+def test_zip_is_geocoded_once_then_cached(monkeypatch, raw):
+    # Bug: looking the zip up on every refresh (extra third-party calls), or never
+    # resolving it so the forecast request goes out without coordinates.
+    import asyncio
+    from dataclasses import replace as dc_replace
+
+    monkeypatch.setenv("WEATHER_ZIP", "28411")
+    monkeypatch.delenv("WEATHER_LAT", raising=False)
+    monkeypatch.delenv("WEATHER_LON", raising=False)
+    cfg = Config.from_env()
+    assert cfg.zip == "28411" and cfg.lat is None
+    lookups, fetched_with = [], []
+
+    async def geocode(c):
+        lookups.append(c.zip)
+        return dc_replace(c, lat=34.3, lon=-77.8, label="Wilmington, NC")
+
+    async def fetch(c):
+        fetched_with.append((c.lat, c.lon))
+        return raw
+
+    clock = Clock()
+    svc = WeatherService(cfg, fetcher=fetch, clock=clock, geocoder=geocode)
+
+    async def go():
+        await svc.get()
+        clock.t += 15 * 60
+        return await svc.get()
+
+    p = asyncio.run(go())
+    assert lookups == ["28411"]
+    assert fetched_with == [(34.3, -77.8), (34.3, -77.8)]
+    assert p["location"] == "Wilmington, NC"

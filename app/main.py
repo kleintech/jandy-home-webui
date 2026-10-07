@@ -96,7 +96,7 @@ def create_app(service: PoolService | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         except BackendError as exc:
             log.warning("controller error: %s", exc)
-            raise HTTPException(502, f"The pool controller didn't respond: {exc}") from exc
+            raise HTTPException(502, f"Couldn't reach the pool: {exc}") from exc
 
     def svc() -> PoolService:
         return app.state.svc

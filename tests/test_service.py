@@ -225,22 +225,38 @@ class TestViewerDrivenPolling:
         backend.refresh = counting
         return PoolService(backend, poll_seconds=15, idle_seconds=60), refreshes
 
-    def test_no_polling_while_nobody_is_watching(self, clock):
-        # Bug: polling Jandy's cloud around the clock with no page open.
+    def test_poll_loop_idle_without_viewers_and_polls_with_one(self):
+        # Bug: polling Jandy's cloud around the clock with no page open (or never
+        # polling while a guest watches the water temperature). Drives the real
+        # poll loop on real time with short intervals.
         import asyncio
 
-        svc, refreshes = self.make()
+        backend = MockBackend()
+        refreshes = []
+        orig = backend.refresh
+
+        async def counting():
+            refreshes.append(1)
+            return await orig()
+
+        backend.refresh = counting
+        svc = PoolService(backend, poll_seconds=0.05, idle_seconds=0.2)
 
         async def go():
-            await svc._refresh()
+            await svc.start()  # one refresh at startup
             refreshes.clear()
-            clock["now"] += 3600
-            # What one poll-loop tick does:
-            if svc._viewed_recently():
-                await svc._refresh_if_due()
+            await asyncio.sleep(0.5)  # ~10 poll intervals, nobody watching
+            idle = len(refreshes)
+            await svc.viewer_state()
+            refreshes.clear()
+            await asyncio.sleep(0.15)  # watched: should keep polling
+            watched = len(refreshes)
+            await svc.close()
+            return idle, watched
 
-        asyncio.run(go())
-        assert refreshes == []
+        idle, watched = asyncio.run(go())
+        assert idle == 0
+        assert watched >= 2
 
     def test_first_view_after_idle_gets_fresh_data(self, clock):
         # Bug: opening the page after an hour shows hour-old temperatures until
@@ -273,18 +289,25 @@ class TestViewerDrivenPolling:
         asyncio.run(go())
         assert len(refreshes) == 4  # t=0, 15, 30, 45
 
-    def test_keeps_polling_while_watched(self, clock):
-        # Bug: water temp never updating while a guest keeps the page open.
-        import asyncio
 
-        svc, refreshes = self.make()
+def test_page_poll_never_queues_behind_a_waiting_command():
+    # Bug: a page poll arriving just as the lock is handed over (lock free, a
+    # command queued for it) waited for that whole, possibly minute-long, command.
+    import asyncio
+    import time as _time
 
-        async def go():
-            await svc.viewer_state()
-            refreshes.clear()
-            clock["now"] += 20
-            if svc._viewed_recently():
-                await svc._refresh_if_due()
+    backend = MockBackend(latency=0.3)
+    svc = PoolService(backend, poll_seconds=0.0001, idle_seconds=60)
 
-        asyncio.run(go())
-        assert refreshes == [1]
+    async def go():
+        await svc._lock.acquire()           # someone (e.g. a poll) holds the lock
+        cmd = asyncio.create_task(svc.set_bubbles(True))
+        await asyncio.sleep(0)              # the command is now queued on the lock
+        svc._lock.release()                 # hand-over instant: unlocked, waiter pending
+        t0 = _time.perf_counter()
+        await svc.viewer_state()
+        waited = _time.perf_counter() - t0
+        await cmd
+        return waited
+
+    assert asyncio.run(go()) < 0.1

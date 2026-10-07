@@ -391,3 +391,38 @@ def test_bad_password_backs_off_instead_of_logging_in_every_poll():
                 await b.refresh()
         assert len(attempts) == 1
     run(go())
+
+
+def test_library_error_text_never_reaches_guests(client, cloud):
+    # Bug: library exception text (URLs, session IDs, serials) echoed in the 502
+    # body to anyone who taps a button.
+    orig = cloud.send_request
+
+    async def leaky(url, method="get", **kw):
+        if (kw.get("params") or {}).get("command", "").startswith("set_aux"):
+            raise AqualinkServiceException("GET https://p-api/x?sessionID=SECRET123&serial=SN1")
+        return await orig(url, method, **kw)
+
+    cloud.send_request = leaky
+    r = client.post("/api/spa/bubbles", json={"on": True})
+    assert r.status_code == 502
+    assert "SECRET123" not in r.text and "SN1" not in r.text
+
+
+def test_wrong_serial_message_masks_serials():
+    # Bug: "no iaqua system (found: <full serial>)" shown on the page and in logs.
+    async def go():
+        class Cloud(FakeCloud):
+            async def login(self):
+                pass
+
+            async def get_systems(self):
+                return {"ABCDEFGH1234": AqualinkSystem.from_data(
+                    self, {"device_type": "iaqua", "serial_number": "ABCDEFGH1234", "name": "P"})}
+
+        b = IAqualinkBackend("u", "p", serial="WRONG")
+        b.client = Cloud()
+        with pytest.raises(BackendError) as e:
+            await b.start()
+        assert "ABCDEFGH1234" not in str(e.value) and "1234" in str(e.value)
+    run(go())

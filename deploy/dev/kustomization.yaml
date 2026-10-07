@@ -15,6 +15,18 @@ patches:
       - op: replace
         path: /data/JANDY_BACKEND
         value: mock
+  # Belt and braces: never load credentials in dev (drop the Secret reference), and pin
+  # the backend with an explicit env entry, which beats anything from envFrom.
+  - target: {kind: Deployment, name: pool}
+    patch: |
+      - op: test
+        path: /spec/template/spec/containers/0/envFrom/1/secretRef/name
+        value: iaqualink-credentials
+      - op: remove
+        path: /spec/template/spec/containers/0/envFrom/1
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: JANDY_BACKEND, value: mock}
   - target: {kind: Ingress, name: pool}
     patch: |
       - op: replace

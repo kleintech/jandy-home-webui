@@ -105,7 +105,9 @@ class IAqualinkBackend:
             log.error("iAqualink rejected the username/password; next try in %.0fs", self._login_backoff)
             raise BackendError("iAqualink rejected the username/password") from exc
         except CALL_ERRORS as exc:
-            raise BackendError(f"login failed: {exc or type(exc).__name__}") from exc
+            # Details (which may include URLs) go to the log, not to guests.
+            log.warning("iAqualink login failed: %r", exc)
+            raise BackendError("couldn't sign in to iAqualink") from exc
         self._login_backoff = 0.0
         iaqua = {k: s for k, s in systems.items() if s.type == "iaqua"}
         if self.serial:
@@ -113,7 +115,8 @@ class IAqualinkBackend:
         elif iaqua:
             self.system = next(iter(iaqua.values()))
         if self.system is None:
-            found = ", ".join(f"{k} ({s.type})" for k, s in systems.items()) or "none"
+            # Masked: this message can reach the page and the log.
+            found = ", ".join(f"…{k[-4:]} ({s.type})" for k, s in systems.items()) or "none"
             raise BackendError(f"no iaqua system on this account (found: {found})")
         log.info("using iAqualink system %s (%s)", self.system.name, self.system.type)
         self._watch_parses(self.system)
@@ -176,7 +179,8 @@ class IAqualinkBackend:
             async with asyncio.timeout(self.timeout):
                 return await coro_fn()
         except CALL_ERRORS as exc:
-            raise BackendError(str(exc) or type(exc).__name__) from exc
+            log.warning("iAqualink call failed: %r", exc)
+            raise BackendError("the pool controller didn't respond") from exc
 
     # ---- device lookup -------------------------------------------------------------
 

@@ -14,7 +14,7 @@ import logging
 import math
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
@@ -27,11 +27,9 @@ log = logging.getLogger(__name__)
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Zip 28411 (Wilmington, NC) centroid, from https://api.zippopotam.us/us/28411.
-DEFAULT_LAT = 34.3033
-DEFAULT_LON = -77.8039
-DEFAULT_LABEL = "Wilmington, NC"
-DEFAULT_TZ = "America/New_York"
+GEOCODE_URL = "https://api.zippopotam.us/{country}/{zip}"
+# "auto": Open-Meteo picks the location's timezone and reports it in the response.
+DEFAULT_TZ = "auto"
 
 CACHE_SECONDS = 600       # serve cached data for 10 minutes
 RETRY_SECONDS = 60        # after a failed refresh, wait this long before trying again
@@ -93,33 +91,46 @@ def describe(code: Any, is_day: bool = True) -> tuple[str, str]:
 
 @dataclass(frozen=True)
 class Config:
-    lat: float = DEFAULT_LAT
-    lon: float = DEFAULT_LON
-    label: str = DEFAULT_LABEL
+    """Where to forecast. No location is built in: set WEATHER_LAT + WEATHER_LON, or
+    WEATHER_ZIP (looked up once at zippopotam.us), or the weather card stays off."""
+
+    lat: float | None = None
+    lon: float | None = None
+    label: str = ""
     tz: str = DEFAULT_TZ
+    zip: str | None = None
+    country: str = "us"
 
     @classmethod
-    def from_env(cls) -> "Config":
-        def f(name: str, default: float) -> float:
+    def from_env(cls) -> "Config | None":
+        def f(name: str) -> float | None:
             raw = os.environ.get(name)
             try:
-                return float(raw) if raw else default
+                v = float(raw) if raw else None
             except ValueError:
+                v = None
+            if raw and (v is None or not math.isfinite(v)):
                 log.warning("ignoring invalid %s=%r", name, raw)
-                return default
+                return None
+            return v
 
         tz = os.environ.get("WEATHER_TZ") or DEFAULT_TZ
-        try:
-            ZoneInfo(tz)
-        except Exception:
-            log.warning("ignoring invalid WEATHER_TZ=%r", tz)
-            tz = DEFAULT_TZ
-        return cls(
-            lat=f("WEATHER_LAT", DEFAULT_LAT),
-            lon=f("WEATHER_LON", DEFAULT_LON),
-            label=os.environ.get("WEATHER_LABEL") or DEFAULT_LABEL,
-            tz=tz,
-        )
+        if tz != "auto":
+            try:
+                ZoneInfo(tz)
+            except Exception:
+                log.warning("ignoring invalid WEATHER_TZ=%r", tz)
+                tz = DEFAULT_TZ
+        label = os.environ.get("WEATHER_LABEL") or ""
+        lat, lon = f("WEATHER_LAT"), f("WEATHER_LON")
+        if lat is not None and lon is not None:
+            return cls(lat=lat, lon=lon, label=label, tz=tz)
+        zip_code = (os.environ.get("WEATHER_ZIP") or "").strip()
+        if zip_code:
+            return cls(label=label, tz=tz, zip=zip_code,
+                       country=(os.environ.get("WEATHER_COUNTRY") or "us").lower())
+        log.info("weather card off: set WEATHER_ZIP or WEATHER_LAT/WEATHER_LON to enable it")
+        return None
 
     def params(self) -> dict[str, Any]:
         return {
@@ -308,7 +319,7 @@ def build_payload(raw: dict[str, Any], cfg: Config, now: datetime,
     (`utc_offset_seconds`), even across a DST change, so rows are windowed in that
     fixed offset and only converted to the real local zone for display.
     """
-    tz = ZoneInfo(cfg.tz)
+    tz = ZoneInfo(raw.get("timezone") if cfg.tz == "auto" else cfg.tz)
     offset = _num(raw.get("utc_offset_seconds"))
     fixed = timezone(timedelta(seconds=offset)) if offset is not None else tz
     if now.tzinfo is not None:
@@ -358,6 +369,18 @@ def build_payload(raw: dict[str, Any], cfg: Config, now: datetime,
 Fetcher = Callable[[Config], Awaitable[dict[str, Any]]]
 
 
+async def geocode_zip(cfg: Config) -> Config:
+    """Resolve WEATHER_ZIP to coordinates (and a label, unless one was given)."""
+    url = GEOCODE_URL.format(country=cfg.country, zip=cfg.zip)
+    async with asyncio.timeout(TIMEOUT_SECONDS + 2), httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        place = r.json()["places"][0]
+    label = cfg.label or ", ".join(
+        x for x in (place.get("place name"), place.get("state abbreviation")) if x)
+    return replace(cfg, lat=float(place["latitude"]), lon=float(place["longitude"]), label=label)
+
+
 async def fetch_open_meteo(cfg: Config) -> dict[str, Any]:
     # httpx's timeout is per read; bound the whole request so a trickling server
     # can't hold the refresh lock.
@@ -374,9 +397,11 @@ class WeatherService:
     """Lazy, cached weather. One refresh at a time; last good data survives failures."""
 
     def __init__(self, cfg: Config | None = None, fetcher: Fetcher = fetch_open_meteo,
-                 clock: Callable[[], float] = time.time):
-        self.cfg = cfg or Config.from_env()
+                 clock: Callable[[], float] = time.time,
+                 geocoder: Callable[[Config], Awaitable[Config]] = geocode_zip):
+        self.cfg = cfg if cfg is not None else Config.from_env()
         self._fetch = fetcher
+        self._geocode = geocoder
         self._clock = clock
         self._lock = asyncio.Lock()
         self._raw: dict[str, Any] | None = None
@@ -397,6 +422,8 @@ class WeatherService:
             if now < self._next_try:      # another request refreshed while we waited
                 return
             try:
+                if self.cfg.lat is None:
+                    self.cfg = await self._geocode(self.cfg)
                 raw = await self._fetch(self.cfg)
                 # Validate before replacing known-good data.
                 build_payload(raw, self.cfg, self._now_local(),
@@ -410,6 +437,8 @@ class WeatherService:
             self._next_try = now + CACHE_SECONDS
 
     async def get(self) -> dict[str, Any]:
+        if self.cfg is None:
+            return {"available": False}
         try:
             await self._refresh_if_due()
             if self._raw is None or self._fetched_at is None:

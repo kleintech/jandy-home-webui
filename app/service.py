@@ -54,6 +54,8 @@ class PoolService:
         self.idle_seconds = idle_seconds
         self._last_viewer = float("-inf")
         self._last_refresh = float("-inf")
+        # Commands waiting for (or holding) the lock; page polls never queue behind them.
+        self._cmd_pending = 0
         self.settle_seconds = settle_seconds
         self.stale_retry_seconds = stale_retry_seconds
         self._commanded: dict[str, tuple[bool, float]] = {}
@@ -88,7 +90,7 @@ class PoolService:
         return time.monotonic() - self._last_refresh >= self.poll_seconds
 
     async def _refresh_if_due(self) -> None:
-        if self._lock.locked() or not self._due():
+        if self._lock.locked() or self._cmd_pending or not self._due():
             return  # a command or another refresh is running and will update state
         try:
             async with self._lock:
@@ -198,6 +200,13 @@ class PoolService:
             setattr(self.snap, "light_on" if name == "light" else name, on)
 
     async def _run(self, action) -> dict[str, Any]:
+        self._cmd_pending += 1
+        try:
+            return await self._run_locked(action)
+        finally:
+            self._cmd_pending -= 1
+
+    async def _run_locked(self, action) -> dict[str, Any]:
         async with self._lock:
             # Decide from fresh state: a stale cache plus a toggle command would flip
             # something the wrong way.
