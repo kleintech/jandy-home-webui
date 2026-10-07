@@ -1,0 +1,34 @@
+# The author's hosts: pool.lab.kleincogroup.com (LAN) and pool.kleincogroup.com (Cloudflare
+# Tunnel + Access). Change both for your setup. Traefik serves wildcard certs from its default
+# TLSStore here, so there is deliberately no secretName.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pool
+  labels:
+    app.kubernetes.io/name: pool
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [pool.lab.kleincogroup.com, pool.kleincogroup.com]
+  rules:
+    - host: pool.lab.kleincogroup.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pool
+                port:
+                  number: 80
+    - host: pool.kleincogroup.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pool
+                port:
+                  number: 80

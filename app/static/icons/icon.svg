@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a8fd6"/><stop offset="1" stop-color="#0077b6"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <g transform="translate(256 256) scale(0.92) translate(-265 -270)"
+     fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- ladder: two handrails curving back over the deck, two rungs -->
+    <g stroke="#fff" stroke-width="30">
+      <path d="M206 330 V178 a46 46 0 0 0 -92 0 v18"/>
+      <path d="M346 330 V178 a46 46 0 0 0 -92 0 v18"/>
+      <path d="M206 222 H346"/>
+      <path d="M206 284 H346"/>
+    </g>
+    <!-- water -->
+    <path d="M96 352 c26 0 38 -22 64 -22 s38 22 64 22 38 -22 64 -22 38 22 64 22 38 -22 64 -22"
+          stroke="#fff" stroke-width="28"/>
+    <path d="M96 414 c26 0 38 -22 64 -22 s38 22 64 22 38 -22 64 -22 38 22 64 22 38 -22 64 -22"
+          stroke="#bfe6ff" stroke-width="28"/>
+  </g>
+</svg>

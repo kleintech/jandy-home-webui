@@ -1,0 +1,12 @@
+# `kubectl -n dev-jandy-home-webui apply -k k8s/` (dev) or Argo CD (prod). No namespace here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+images:
+  # Immutable git-SHA tag, never "latest".
+  - name: registry.lab.kleincogroup.com/jandy-home-webui/pool
+    newTag: e8d23159b80a1723023af885ba5c2b1e311eabdb

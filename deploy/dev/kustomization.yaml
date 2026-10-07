@@ -1,0 +1,43 @@
+# Dev deploy: the app on the MOCK backend, never the live panel, at
+# https://pool-dev.lab.kleincogroup.com (prod owns pool.lab / pool.kleincogroup.com).
+#   sha=$(git rev-parse HEAD)   # an image pushed for that commit
+#   kubectl kustomize deploy/dev | sed "s/:dev-image-tag/:$sha/" | kubectl -n dev-jandy-home-webui apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../k8s
+images:
+  - name: registry.lab.kleincogroup.com/jandy-home-webui/pool
+    newTag: dev-image-tag
+patches:
+  - target: {kind: ConfigMap, name: pool-config}
+    patch: |
+      - op: replace
+        path: /data/JANDY_BACKEND
+        value: mock
+  # Belt and braces: never load credentials in dev (drop the Secret reference), and pin
+  # the backend with an explicit env entry, which beats anything from envFrom.
+  - target: {kind: Deployment, name: pool}
+    patch: |
+      - op: test
+        path: /spec/template/spec/containers/0/envFrom/1/secretRef/name
+        value: iaqualink-credentials
+      - op: remove
+        path: /spec/template/spec/containers/0/envFrom/1
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: JANDY_BACKEND, value: mock}
+  - target: {kind: Ingress, name: pool}
+    patch: |
+      - op: replace
+        path: /spec/tls
+        value: [{hosts: [pool-dev.lab.kleincogroup.com]}]
+      - op: replace
+        path: /spec/rules
+        value:
+          - host: pool-dev.lab.kleincogroup.com
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend: {service: {name: pool, port: {number: 80}}}

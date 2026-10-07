@@ -1,0 +1,17 @@
+# Run it at home with Docker:  cp .env.example .env  (edit it)  &&  docker compose up -d
+# Then open http://<this-machine>:8080 on your phone. See README.md.
+services:
+  pool:
+    build: .
+    image: jandy-home-webui:local
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
+    read_only: true
+    user: "1000:1000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

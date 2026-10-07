@@ -1,0 +1,9 @@
+.venv
+.git
+.claude
+**/__pycache__
+.pytest_cache
+tests
+k8s
+.env
+*.env

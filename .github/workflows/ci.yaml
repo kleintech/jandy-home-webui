@@ -1,0 +1,22 @@
+# Tests only, on GitHub-hosted runners. This repo is public, so it deliberately does
+# not use the lab's self-hosted runners (fork PRs would run on the LAN), and images are
+# built and pushed to registry.lab.kleincogroup.com by hand (see README).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen
+      - run: uv run pytest -q
