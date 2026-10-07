@@ -31,6 +31,9 @@ How it scores
    ======== ============ ===== ==========
 
    The "max level" cap means nice weather can't talk cold water up to "Great".
+   Water above 100°F (past where pool water should be; hot tubs top out at 104°F)
+   is "too hot for a long swim" and capped at Fair. Separately, climbing out into
+   air that feels < 55°F caps the level at Chilly, and < 45°F at Cold.
 
 2. **Getting out** (evaporative chill). Wet skin loses heat fast, so what matters is
    the air you climb out into. Uses the feels-like temperature (falls back to air
@@ -46,34 +49,58 @@ How it scores
    cooler day the sun no longer offsets a wet guest's chill).
 
 4. **Heat**: when it feels >= 90°F (or air >= 85°F with humidity >= 65%, "muggy"),
-   water <= 88°F is a relief (+1); water > 90°F gives no relief (-1).
+   water <= 88°F is a relief (+1); water > 90°F gives no relief (-1). Cold or brisk
+   water is still called cold ("70° water is cold, but a relief from the heat").
 
 5. **Missing water temp** (Jandy reports none while the filter pump is off; in spa
    mode the pool sensor may be blank): the base comes from the feels-like air
    temperature instead (>= 85: 4, >= 78: 3, >= 72: 2, >= 65: 1, else 0), the same
-   adjustments apply, the level is capped at Great, and the sentence says the water
-   temperature shows when the pump is running.
+   adjustments apply, the level is capped at Great, and the sentence says why the
+   water temperature is missing (pump off, spa mode, controller offline/unknown).
 
 6. **Hazards** override the score. Thunder now or a thunderstorm code (95/96/99)
    in the next 3 hours gives rating "Storms" with a get-out-at-first-thunder line
-   (lightning: "when thunder roars, go indoors"). Rain now, or a >= 60% chance in
-   the next 3 hours, is mentioned in the sentence but doesn't change the rating.
+   (lightning: "when thunder roars, go indoors"). Rain, snow or freezing rain now, or
+   a >= 60% chance in the next 3 hours (from now), is mentioned in the sentence but
+   doesn't change the rating: "soon" when under 45 minutes away, else "by <hour>"
+   rounded up.
+
+7. **Day/night**: `is_day` from the payload; when missing, the local hour (7-19 is
+   day), else neutral wording -- a missing flag never reads as night.
 
 The sentence is "<Rating> for swimming: <water>, <one condition>." -- the most salient
 condition wins (rain > heat relief > wind/cool chill > overcast/night > sun/calm), so
-it stays to two short clauses. Temperatures are rounded whole °F, as on the panel.
+it stays to two short clauses. Temperatures are rounded whole °F, as on the panel;
+the feels-like temperature is printed as "feels like 60°" when it is 3°+ off the air.
 """
 
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
 
 # Same WMO codes as app.weather.THUNDER_CODES (kept here so this module has no
 # imports from the weather service and stays trivially testable).
 THUNDER_CODES = frozenset({95, 96, 99})
-LOOKAHEAD = timedelta(hours=3)
+SNOW_CODES = frozenset({71, 73, 75, 77, 85, 86})
+FREEZING_CODES = frozenset({56, 57, 66, 67})   # freezing drizzle / freezing rain
+LOOKAHEAD = timedelta(hours=3)                  # measured from now
+STEP_MAX = timedelta(hours=1)   # a row this recent still covers "now" (the current slot)
+SOON = timedelta(minutes=45)    # rain closer than this is "soon", not "by <hour>"
+DAY_START, DAY_END = 7, 19      # local-hour fallback when is_day is missing
+
+TOO_HOT_F = 100       # above this, pool water is hot-tub warm: at most Fair
+COLD_FEEL = 55        # feels-like below this: at most Chilly, "cold" getting out
+FREEZING_FEEL = 45    # feels-like below this: Cold, "freezing" getting out
+
+# Why the water temperature is missing -> what the sentence says about it.
+WATER_NOTES = {
+    "pump_off": "water temp shows when the pump is running",
+    "spa": "pool temp isn't measured in spa mode",
+    "offline": "pool temp unavailable",
+    "unknown": "pool temp unavailable",
+}
 
 RATINGS = ("Cold", "Chilly", "Fair", "Good", "Great", "Perfect")
 
@@ -122,39 +149,81 @@ def _air_base(feel: int) -> int:
     return 0
 
 
-def _hour_label(iso: str) -> str:
-    """'2026-10-07T15:45-04:00' -> '4 PM' (nearest hour, the pool's own clock)."""
-    dt = datetime.fromisoformat(iso)
-    dt = (dt + timedelta(minutes=30)).replace(minute=0)
-    h = dt.hour % 12 or 12
-    return f"{h} {'AM' if dt.hour < 12 else 'PM'}"
+def _parse_time(v: Any) -> datetime | None:
+    if not isinstance(v, str):
+        return None
+    try:
+        return datetime.fromisoformat(v)
+    except ValueError:
+        return None
 
 
-def _soon(upcoming: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Forecast points within LOOKAHEAD of the first one (the current slot)."""
-    pts = []
-    start = None
-    for p in upcoming or ():
-        try:
-            t = datetime.fromisoformat(p["time"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if start is None:
-            start = t
-        if t - start <= LOOKAHEAD:
-            pts.append(p)
-    return pts
+def _hour_label(t: datetime, up: bool = False) -> str:
+    """15:45 -> '4 PM' (nearest hour, or the next whole hour with up=True), on the
+    pool's own clock (the forecast row's offset)."""
+    if up:
+        if t.minute or t.second or t.microsecond:
+            t = t.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    else:
+        t = (t + timedelta(minutes=30)).replace(minute=0, second=0, microsecond=0)
+    h = t.hour % 12 or 12
+    return f"{h} {'AM' if t.hour < 12 else 'PM'}"
+
+
+def _rows(upcoming: Any) -> list[tuple[datetime, dict[str, Any]]]:
+    """(time, row) for every usable forecast row; anything malformed is skipped."""
+    out = []
+    try:
+        it = iter(upcoming) if upcoming is not None else iter(())
+    except TypeError:
+        return out
+    for p in it:
+        if isinstance(p, dict):
+            t = _parse_time(p.get("time"))
+            if t is not None:
+                out.append((t, p))
+    return out
+
+
+def _clock(rows: list[tuple[datetime, dict[str, Any]]], now: Any):
+    """A common aware timeline: (rows with aware times, aware now or None).
+
+    Naive times (rows or `now`) are read in the forecast's own offset (the first
+    aware row's), else UTC, so mixed naive/aware input never raises on compare.
+    `now` defaults to the first row's time (the current slot)."""
+    ref = next((t.tzinfo for t, _ in rows if t.tzinfo is not None), None)
+    if ref is None:
+        ref = now.tzinfo if isinstance(now, datetime) and now.tzinfo is not None else UTC
+    fix = [(t if t.tzinfo is not None else t.replace(tzinfo=ref), p) for t, p in rows]
+    if isinstance(now, datetime):
+        now = now if now.tzinfo is not None else now.replace(tzinfo=ref)
+        now = now.astimezone(ref)
+    else:
+        now = fix[0][0] if fix else None
+    return fix, now
+
+
+def _precip_word(code: Any, icon: Any = None) -> str:
+    c = _num(code)
+    if icon == "snow" or c in SNOW_CODES:
+        return "snow"
+    if c in FREEZING_CODES:
+        return "freezing rain"
+    return "rain"
 
 
 def swim_comfort(water_f: Any, current: dict[str, Any] | None,
                  upcoming: Iterable[dict[str, Any]] | None = None,
-                 now_is_day: bool | None = None) -> dict[str, Any] | None:
+                 now_is_day: bool | None = None, now: datetime | None = None,
+                 water_reason: str | None = None) -> dict[str, Any] | None:
     """Rate swimming comfort now. See the module docstring for the model.
 
     `water_f`: pool water °F or None. `current`: the weather payload's `current`
-    block (temp_f, feels_like_f, wind_mph, humidity, cloud_cover, icon, is_day...).
-    `upcoming`: the payload's `hourly` rows (time, precip_prob, code, ...).
-    `now_is_day` overrides `current["is_day"]` when given.
+    block (temp_f, feels_like_f, wind_mph, humidity, cloud_cover, icon, code,
+    is_day...). `upcoming`: the payload's `hourly` rows (time, precip_prob, code, ...).
+    `now_is_day` overrides `current["is_day"]` when given. `now` is the current time
+    (defaults to the first forecast row). `water_reason` says why `water_f` is None:
+    "offline", "spa", "pump_off" (the default) or "unknown". Never raises.
     """
     if not isinstance(current, dict):
         return None
@@ -168,25 +237,46 @@ def swim_comfort(water_f: Any, current: dict[str, Any] | None,
     hum = _num(current.get("humidity"))
     cloud = _num(current.get("cloud_cover"))
     icon = current.get("icon")
-    is_day = bool(current.get("is_day")) if now_is_day is None else bool(now_is_day)
+    code = _num(current.get("code"))
     water_num = _num(water_f)
     water = _rnd(water_num) if water_num is not None else None
-    soon = _soon(upcoming or [])
+
+    rows, now = _clock(_rows(upcoming), now)
+    soon = [(t, p) for t, p in rows if now is not None and now - STEP_MAX < t <= now + LOOKAHEAD]
+
+    # Day/night: explicit flag, else the payload's, else the local hour (7-19 is day),
+    # else unknown -- never assume night just because the flag is missing.
+    day_flag = now_is_day if now_is_day is not None else current.get("is_day")
+    if isinstance(day_flag, (bool, int, float)) and not (isinstance(day_flag, float) and math.isnan(day_flag)):
+        is_day: bool | None = bool(day_flag)
+    elif now is not None:
+        is_day = DAY_START <= now.hour < DAY_END
+    else:
+        is_day = None
+    night = is_day is False
 
     # ---- hazards: thunder overrides everything
-    if icon == "storm":
+    if icon == "storm" or code in THUNDER_CODES:
         return _result("Storms", 0, "Storms now — stay out of the pool until 30 minutes after the last thunder.")
-    thunder = next((p for p in soon if _num(p.get("code")) in THUNDER_CODES), None)
+    thunder = next((t for t, p in soon if _num(p.get("code")) in THUNDER_CODES), None)
     if thunder is not None:
         return _result("Storms", 0,
-                       f"Storms possible around {_hour_label(thunder['time'])} — "
+                       f"Storms possible around {_hour_label(thunder)} — "
                        "get out at the first thunder.")
 
     # ---- base
     if water is not None:
         band, level, cap = water_band(water)
+        if water > TOO_HOT_F:
+            band, cap = "too hot for a long swim", min(cap, 2)
     else:
         band, level, cap = None, _air_base(feel), 4
+    # Climbing out into near-freezing air is never better than Chilly/Cold,
+    # however warm the water.
+    if feel < FREEZING_FEEL:
+        cap = 0
+    elif feel < COLD_FEEL:
+        cap = min(cap, 1)
 
     # ---- getting out: chill penalties
     penalty = 0
@@ -204,14 +294,14 @@ def swim_comfort(water_f: Any, current: dict[str, Any] | None,
     dry = hum is not None and hum < 40 and feel < 80
     if dry:
         penalty += 1
-    overcast = is_day and cloud is not None and cloud >= 80
-    gloomy = (overcast or not is_day) and feel < 75
+    overcast = is_day is not False and cloud is not None and cloud >= 80
+    gloomy = (overcast or night) and feel < 75
     if gloomy:
         penalty += 1
     level -= min(penalty, 4)
 
     # ---- sun and heat
-    sunny = is_day and cloud is not None and cloud <= 40
+    sunny = is_day is True and cloud is not None and cloud <= 40
     if sunny and 70 <= feel < 85:
         level += 1
     hot = feel >= 90 or (air_i >= 85 and hum is not None and hum >= 65)
@@ -226,57 +316,83 @@ def swim_comfort(water_f: Any, current: dict[str, Any] | None,
     rating = RATINGS[level]
 
     # ---- sentence: "<Rating> for swimming: <water>, <one condition>."
-    rain_now = icon in ("rain", "drizzle")
-    # "by" the first slot that crosses the threshold, not the peak.
-    wet = next((p for p in soon if (_num(p.get("precip_prob")) or 0) >= RAIN_LIKELY_PCT), None)
-    rain = ("with rain falling" if rain_now else None if wet is None else
-            "but rain likely soon" if wet is soon[0] else
-            f"but rain likely by {_hour_label(wet['time'])}")
+    # Feels-like is named as such when it is noticeably off the air temperature.
+    differs = abs(feel - air_i) >= 3
+    temp = f"feels like {feel}°" if differs else f"{feel}°"
+    cold_word = "freezing" if feel < FREEZING_FEEL else "cold"
+    cool_word = cold_word if feel < COLD_FEEL else "cool"
+
+    if icon == "snow" or code in SNOW_CODES:
+        rain = "with snow falling"
+    elif code in FREEZING_CODES:
+        rain = "with freezing rain falling"
+    elif icon in ("rain", "drizzle"):
+        rain = "with rain falling"
+    else:
+        # "by" the first slot that crosses the threshold, not the peak.
+        wet = next(((t, p) for t, p in soon
+                    if (_num(p.get("precip_prob")) or 0) >= RAIN_LIKELY_PCT), None)
+        if wet is None:
+            rain = None
+        else:
+            what = _precip_word(wet[1].get("code"))
+            rain = (f"but {what} likely soon" if wet[0] - now < SOON else
+                    f"but {what} likely by {_hour_label(wet[0], up=True)}")
 
     if water is None:
-        if not is_day:
-            sky = f"{feel}° tonight"
+        if night:
+            sky = f"{temp} tonight"
         elif sunny:
-            sky = f"{feel}° and sunny"
+            sky = f"{temp} and sunny"
         elif overcast:
-            sky = f"{feel}° and overcast"
+            sky = f"{temp} and overcast"
+        elif is_day is None:
+            sky = f"{temp} outside"
         else:
-            sky = f"{feel}° and partly cloudy"
+            sky = f"{temp} and partly cloudy"
         extra = rain or ("but windy" if windy else "but breezy" if breezy else None)
         body = sky if extra is None else f"{sky}, {extra}"
-        return _result(rating, level,
-                       f"{rating} for swimming: {body}; water temp shows when the pump is running.")
+        note = WATER_NOTES.get(water_reason or "pump_off", WATER_NOTES["unknown"])
+        return _result(rating, level, f"{rating} for swimming: {body}; {note}.")
 
     chill = None
-    if windy and feel < 80:
-        chill = f"but {feel}° and windy feels cold getting out"
-    elif breezy:
-        chill = f"but {feel}° and breezy feels cold getting out"
+    if (windy and feel < 80) or breezy:
+        w = "windy" if windy else "breezy"
+        chill = (f"but {w} and {temp}, {cold_word} getting out" if differs else
+                 f"but {feel}° and {w} feels {cold_word} getting out")
     elif cool:
-        chill = f"but {feel}° {'dry ' if dry else ''}air feels cool getting out"
+        chill = (f"but {'dry and ' if dry else ''}{temp}, {cool_word} getting out" if differs else
+                 f"but {feel}° {'dry ' if dry else ''}air feels {cool_word} getting out")
     elif dry and feel < 75:
         chill = "but dry air feels cool getting out"
 
+    cold_water = band in ("cold", "brisk")
     if rain:
         cond = rain
     elif relief:
-        cond = "a relief from the muggy heat" if hum is not None and hum >= 55 else "a relief from the heat"
+        heat = "the muggy heat" if hum is not None and hum >= 55 else "the heat"
+        # Cold water on a hot day is still cold: say so, then the relief.
+        cond = f"but a relief from {heat}" if cold_water else f"a relief from {heat}"
     elif no_relief:
         cond = "not much relief from the heat"
     elif chill:
         cond = chill
     elif windy:
         cond = "but windy"
-    elif not is_day:
-        cond = f"{'a cool' if feel < 70 else 'a mild' if feel < 78 else 'a warm'} {feel}° night"
+    elif night:
+        mood = ("a cold" if feel < COLD_FEEL else "a cool" if feel < 70 else
+                "a mild" if feel < 78 else "a warm")
+        cond = f"{mood} night that {temp}" if differs else f"{mood} {feel}° night"
     elif overcast and gloomy:
-        cond = f"but overcast and {feel}°"
+        cond = f"but overcast and {temp}"
     elif sunny:
         cond = "sunny and calm" if wind < BREEZY_MPH else "sunny and breezy"
     elif overcast:
-        cond = f"overcast and {feel}°"
+        cond = f"overcast and {temp}"
+    elif is_day is None:
+        cond = f"{temp} outside"
     else:
-        cond = f"partly cloudy and {feel}°"
+        cond = f"partly cloudy and {temp}"
 
     # Name the band unless it is "ideal" (the number says enough), or a "but ..."
     # clause already explains the rating and "refreshing" would read as a contradiction.

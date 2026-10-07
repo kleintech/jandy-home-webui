@@ -117,8 +117,15 @@ class TestCurrentAndSummary:
         assert c == {
             "temp_f": 74, "feels_like_f": 77, "humidity": 54, "wind_mph": 4,
             "cloud_cover": 0, "precip_prob": 0, "description": "Sunny",
-            "icon": "clear", "is_day": True,
+            "icon": "clear", "code": 0, "is_day": True,
         }
+
+    def test_missing_is_day_falls_back_to_local_hour_not_night(self, raw):
+        # Bug: a response without is_day became is_day False, so a 1:50 PM swim
+        # note said "a mild night" and the sun bonus/"Sunny" wording vanished.
+        del raw["current"]["is_day"]
+        assert payload(raw)["current"]["is_day"] is True
+        assert payload(raw, now=datetime(2026, 10, 7, 22, 0))["current"]["is_day"] is False
 
     def test_temps_round_half_up_like_the_frontend(self, raw):
         # Bug: Python's banker's rounding shows 74° in the header while the chart
@@ -470,11 +477,13 @@ class TestHumidity:
 # ---------------------------------------------------------------- swim comfort
 
 class _Svc:
-    """Stand-in for app.state.svc: only `.snap` is read by the weather route."""
+    """Stand-in for app.state.svc: `.snap` and `.updated_at` are read by the weather
+    route. `updated_at` defaults to just now (a live snapshot)."""
 
-    def __init__(self, **snap):
+    def __init__(self, updated_at="now", **snap):
         from app.backends.base import Snapshot
         self.snap = Snapshot(**snap)
+        self.updated_at = datetime.now(timezone.utc) if updated_at == "now" else updated_at
 
 
 def _swim_app(monkeypatch, raw, svc=None):
@@ -498,24 +507,70 @@ class TestSwimRoute:
 
     def test_disconnected_controller_means_no_water_temp(self, monkeypatch, raw):
         # Bug: a stale pool_temp from before the controller dropped is presented as live.
-        c = _swim_app(monkeypatch, raw, _Svc(connected=False, pool_temp=84))
+        # Also: offline was blamed on the pump ("shows when the pump is running").
+        c = _swim_app(monkeypatch, raw, _Svc(connected=False, pool_temp=84, filter_pump=True))
         swim = c.get("/api/weather").json()["swim"]
         assert "84° water" not in swim["text"]
-        assert "water temp shows when the pump is running" in swim["text"]
+        assert "pool temp unavailable" in swim["text"]
+        assert "pump" not in swim["text"]
 
-    def test_pump_off_blank_pool_temp(self, monkeypatch, raw):
-        # Bug: pool_temp None (pump off / spa mode) crashes or prints "None°".
-        c = _swim_app(monkeypatch, raw, _Svc(connected=True, pool_temp=None, spa_mode=True))
+    def test_spa_mode_blank_pool_temp_says_spa_not_pump(self, monkeypatch, raw):
+        # Bug: pool_temp None in spa mode crashes, prints "None°", or claims the temp
+        # shows "when the pump is running" while the pump IS running (for the spa).
+        c = _swim_app(monkeypatch, raw, _Svc(connected=True, pool_temp=None, spa_mode=True,
+                                              filter_pump=True))
         swim = c.get("/api/weather").json()["swim"]
         assert "None" not in swim["text"]
-        assert "water temp shows" in swim["text"]
+        assert "pool temp isn't measured in spa mode" in swim["text"]
+        assert "pump" not in swim["text"]
+
+    def test_pump_off_blank_pool_temp_says_pump(self, monkeypatch, raw):
+        # Bug: the pump-off case loses its explanation once reasons are distinguished.
+        c = _swim_app(monkeypatch, raw, _Svc(connected=True, pool_temp=None, filter_pump=False))
+        assert "water temp shows when the pump is running" in \
+            c.get("/api/weather").json()["swim"]["text"]
+
+    def test_old_pool_snapshot_is_not_live_water_temp(self, monkeypatch, raw):
+        # Bug: after an idle spell the weather request lands before the page's first
+        # /api/state refresh, and an hours-old pool_temp is shown as the water now.
+        from datetime import timedelta as td
+        old = datetime.now(timezone.utc) - td(minutes=30)
+        c = _swim_app(monkeypatch, raw, _Svc(updated_at=old, connected=True, pool_temp=84,
+                                              filter_pump=True))
+        text = c.get("/api/weather").json()["swim"]["text"]
+        assert "84° water" not in text and "pool temp unavailable" in text
 
     def test_no_pool_service_on_app_still_serves_weather(self, monkeypatch, raw):
         # Bug: AttributeError on app.state.svc (weather-only app, startup race) -> 500.
+        # (Expectation changed: no service is "unavailable", not a pump-off claim.)
         r = _swim_app(monkeypatch, raw).get("/api/weather")
         assert r.status_code == 200
         body = r.json()
-        assert body["available"] is True and "water temp shows" in body["swim"]["text"]
+        assert body["available"] is True and "pool temp unavailable" in body["swim"]["text"]
+
+    def test_stale_weather_has_no_swim_note(self, monkeypatch, raw):
+        # Bug: with refreshes failing, hours-old weather kept saying "sunny and calm"
+        # as if it were right now (even after dark).
+        f, clock = Fetcher(raw), Clock()
+        monkeypatch.setattr(weather, "_service", WeatherService(CFG, fetcher=f, clock=clock))
+        app = FastAPI()
+        app.include_router(weather.router)
+        app.state.svc = _Svc(connected=True, pool_temp=84)
+        c = TestClient(app)
+        assert "swim" in c.get("/api/weather").json()
+        f.fail = True
+        clock.t += 15 * 60
+        body = c.get("/api/weather").json()
+        assert body["available"] is True and body["stale"] is True and "swim" not in body
+
+    def test_old_but_not_flagged_stale_weather_has_no_swim_note(self, raw):
+        # Bug: only the `stale` flag is checked, so a payload whose updated_at is hours
+        # old (e.g. a cached response, clock skew) still drives "right now" guidance.
+        from datetime import timedelta as td
+        fetched = datetime(2026, 10, 7, 14, 0, tzinfo=timezone.utc)
+        p = build_payload(raw, CFG, NOW_LOCAL, fetched, False)
+        assert "swim" not in weather.add_swim(p, 84, None, fetched + td(minutes=61))
+        assert "swim" in weather.add_swim(p, 84, None, fetched + td(minutes=59))
 
     def test_celsius_panel_is_converted(self, monkeypatch, raw):
         # Bug: a °C panel's 29 is read as 29°F water ("cold").

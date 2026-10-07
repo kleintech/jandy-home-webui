@@ -8,8 +8,9 @@ the pool and spa without the iAqualink app or your account. They can:
 - set **temperatures**
 - toggle **Bubbles**, **Spillover** and **Water Features**
 
-It also shows the water and air temperature and an optional 6-hour **weather** forecast,
-and can be added to a phone's home screen like an app.
+It also shows the water and air temperature, an optional 6-hour **weather** forecast
+with a one-line **"how's the swimming?"** rating, and can be added to a phone's home
+screen like an app.
 
 It runs as one small container on your home network and talks to your pool through the
 iAqualink cloud, using [flz/iaqualink-py](https://github.com/flz/iaqualink-py) (the
@@ -156,13 +157,14 @@ data is fetched.
 |---|---|
 | **Spa Mode** | Turns the filter pump on (only if it's off), then spa mode on, then spa heat on. If the panel's spa set point is above `SPA_MAX`, it's lowered to `SPA_MAX` first. |
 | **Pool Mode** | Turns spa heat off, then spa mode off. The filter pump schedule and the pool heater or heat pump are left alone. |
-| **Light** | Turning it on always starts on white. Off is off. |
+| **Light** | Turning it on always starts on white. Off is off. Relay color lights (Jandy, Pentair, Hayward) pick colors by switching power, so for those a note says the light may cycle on and off a few times. |
 | **Light color** | The light's own color list (Jandy WaterColors, Pentair, Hayward, …). The panel's white ("Alpine White", "Cloud White") is shown as **White**. |
 | **Spa Set Temp** | `spa_set_point`, from `SPA_MIN` to `SPA_MAX`. |
 | **Pool Set Temp** | One bar with two handles: **Heat** (the low set point, `pool_set_point`) and **Chill** (the high one, `pool_chill_set_point`; heat pumps with chill only). |
 | **Bubbles / Water Features / Spillover** | Switches the mapped device on or off. Spillover and Water Features can't both be on. |
 | **Water Temp / Air Temp** | `spa_temp` or `pool_temp` (depending on the mode) / `air_temp`. |
-| **Weather** | Not from the Jandy: an [Open-Meteo](https://open-meteo.com) forecast for the next 6 hours, cached for 10 minutes. |
+| **Weather** | An [Open-Meteo](https://open-meteo.com) forecast for the next 6 hours (temperature, chance of rain, cloud cover, humidity), cached for 10 minutes. |
+| **Swim rating** | One sentence under the forecast, e.g. "**Perfect** for swimming: 84° water, sunny and calm." It combines the Jandy's pool water temperature with the forecast's feels-like temperature, wind, humidity, clouds, day/night and upcoming rain or storms (`app/comfort.py`). Storms always override. Without a fresh water reading (pump off, spa mode, controller offline) it rates the air conditions and says why. |
 
 The dot next to the title shows whether the server can reach your pool controller: green
 when it can, red when it can't.
@@ -290,6 +292,7 @@ Where things are:
 - `app/backends/iaqualink.py`: maps the house rules onto iaqualink-py.
 - `app/backends/mock.py`: the pretend pool.
 - `app/weather.py`: the forecast.
+- `app/comfort.py`: the swim rating (bands and rules documented in the module).
 - `app/discover.py`: the read-only device lister.
 - `app/static/`: the UI, in plain HTML, CSS and JS with no build step and no CDNs.
 

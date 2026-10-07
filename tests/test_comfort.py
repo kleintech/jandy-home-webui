@@ -225,3 +225,180 @@ def test_rain_already_likely_in_current_slot_says_soon():
     # Bug: "rain likely by 1 PM" when it is already 1 PM (a time in the past/now).
     r = swim_comfort(84, cur(), hours(80, 80, 80))
     assert "rain likely soon" in r["text"]
+
+
+# ---------------------------------------------------------------- review fixes
+
+def at(hhmm, tz="-04:00"):
+    """An aware 'now' on 2026-10-07 in the forecast's offset."""
+    from datetime import datetime
+    return datetime.fromisoformat(f"2026-10-07T{hhmm}{tz}")
+
+
+def quarter_hours(start, probs, codes=None):
+    """15-minute forecast rows from local start 'HH:MM'."""
+    from datetime import datetime, timedelta
+    codes = codes or {}
+    t0 = datetime.fromisoformat(f"2026-10-07T{start}-04:00")
+    return [{"time": (t0 + timedelta(minutes=15 * i)).isoformat(timespec="minutes"),
+             "precip_prob": p, "code": codes.get(i, 1)} for i, p in enumerate(probs)]
+
+
+class TestColdAir:
+    def test_freezing_air_caps_warm_water_at_cold(self):
+        # Bug: 84° water + 30° air rated "Fair ... feels cool getting out".
+        r = swim_comfort(84, cur(temp_f=30, feels_like_f=30, cloud_cover=10), DRY)
+        assert r["rating"] == "Cold"
+        assert "freezing" in r["text"] and "cool" not in r["text"]
+
+    def test_cold_air_caps_warm_water_at_chilly(self):
+        # Bug: 50° air with ideal water rated Fair/Good and called merely "cool".
+        r = swim_comfort(86, cur(temp_f=50, feels_like_f=50), DRY)
+        assert r["level"] <= 1
+        assert "cold getting out" in r["text"] and "cool" not in r["text"]
+
+    def test_snow_falling_is_mentioned(self):
+        # Bug: snow now (icon "snow") not mentioned at all, unlike rain.
+        r = swim_comfort(84, cur(temp_f=31, feels_like_f=25, icon="snow", cloud_cover=100), DRY)
+        assert "snow falling" in r["text"]
+
+    def test_freezing_rain_now_is_mentioned(self):
+        # Bug: freezing rain (WMO 66, icon "rain") reported as plain rain.
+        r = swim_comfort(84, cur(temp_f=33, feels_like_f=27, icon="rain", code=66), DRY)
+        assert "freezing rain falling" in r["text"]
+
+    def test_snow_in_forecast_is_called_snow(self):
+        # Bug: a 70% snow-shower slot reported as "rain likely".
+        r = swim_comfort(84, cur(temp_f=34, feels_like_f=28),
+                         hours(10, 10, 70, codes={2: 85}))
+        assert "snow likely by 3 PM" in r["text"] and "rain" not in r["text"]
+
+
+class TestWording:
+    def test_cold_water_on_hot_day_does_not_contradict(self):
+        # Bug: "Chilly ... 70° water is cold, a relief from the muggy heat" -- the
+        # relief clause read as praise next to a cold rating.
+        r = swim_comfort(70, cur(temp_f=95, feels_like_f=108, humidity=70), DRY)
+        assert r["rating"] in ("Cold", "Chilly")
+        assert "70° water is cold, but a relief from the muggy heat" in r["text"]
+
+    def test_rain_15_minutes_away_says_soon(self):
+        # Bug: at 3:02 a 3:15 rain slot printed "rain likely by 3 PM" (rounded down,
+        # reads as already past).
+        r = swim_comfort(84, cur(), quarter_hours("15:00", [10, 70, 70]), now=at("15:02"))
+        assert "rain likely soon" in r["text"]
+
+    def test_rain_by_time_rounds_up(self):
+        # Bug: a 3:15 slot two hours out printed "by 3 PM" -- before the rain arrives
+        # the deadline has already passed.
+        rows = quarter_hours("13:00", [10] * 9 + [70])   # 70% at 15:15
+        r = swim_comfort(84, cur(), rows, now=at("13:02"))
+        assert "rain likely by 4 PM" in r["text"]
+
+    def test_feels_like_named_when_it_differs(self):
+        # Bug: a 68° day that feels like 60° printed "60° air", contradicting the
+        # 68° on the panel.
+        r = swim_comfort(84, cur(temp_f=68, feels_like_f=60), DRY)
+        assert "feels like 60°" in r["text"] and "60° air" not in r["text"]
+        # Within 2° the plain number still reads fine.
+        assert "66° air" in swim_comfort(84, cur(temp_f=67, feels_like_f=66), DRY)["text"]
+
+    def test_hot_tub_water_is_at_most_fair(self):
+        # Bug: 102° pool water rated "Good ... bath-warm, sunny and calm".
+        r = swim_comfort(102, cur(), DRY)
+        assert r["level"] <= 2
+        assert "102° water is too hot for a long swim" in r["text"]
+        # 100° itself stays bath-warm (the edge).
+        assert "bath-warm" in swim_comfort(100, cur(), DRY)["text"]
+
+    @pytest.mark.parametrize("reason,words", [
+        ("spa", "pool temp isn't measured in spa mode"),
+        ("offline", "pool temp unavailable"),
+        ("unknown", "pool temp unavailable"),
+        ("pump_off", "water temp shows when the pump is running"),
+    ])
+    def test_missing_water_reason_wording(self, reason, words):
+        # Bug: every missing-water case blamed the pump, even in spa mode (pump
+        # running) or with the controller offline.
+        r = swim_comfort(None, cur(), DRY, water_reason=reason)
+        assert r["text"].endswith(f"; {words}.")
+
+
+class TestDayNight:
+    def test_missing_is_day_by_daylight_is_not_night(self):
+        # Bug: is_day missing -> bool(None) -> "a mild night" at 2 PM.
+        c = cur(temp_f=74, feels_like_f=74)
+        del c["is_day"]
+        r = swim_comfort(84, c, DRY, now=at("14:00"))
+        assert "night" not in r["text"] and "sunny" in r["text"]
+
+    def test_missing_is_day_after_dark_uses_local_hour(self):
+        # Bug: the fallback ignores the pool's clock (e.g. reads the UTC hour).
+        c = cur(temp_f=74, feels_like_f=74)
+        del c["is_day"]
+        assert "night" in swim_comfort(84, c, [], now=at("22:00"))["text"]
+        # 21:00 UTC is 17:00 at the pool: still day on the forecast's clock.
+        rows = hours(0, 0, start=17)
+        r = swim_comfort(84, c, rows, now=at("21:00", "+00:00"))
+        assert "night" not in r["text"] and "sunny" in r["text"]
+
+    def test_missing_is_day_and_no_clock_is_neutral(self):
+        # Bug: with no flag and no time, the note assumes night (or sun).
+        c = cur(temp_f=74, feels_like_f=74)
+        del c["is_day"]
+        r = swim_comfort(84, c, [])
+        assert "night" not in r["text"] and "sunny" not in r["text"]
+        assert r["text"] == "Perfect for swimming: 84° water, 74° outside."
+
+
+class TestLookaheadFromNow:
+    def test_storm_within_three_hours_of_now_counts_even_if_rows_start_earlier(self):
+        # Bug: lookahead measured from the first row (10:00, an old slot), so a
+        # thunderstorm at 14:00 -- 90 minutes from now (12:30) -- was ignored.
+        rows = hours(0, 0, 0, 0, 0, start=10, codes={4: 95})
+        r = swim_comfort(84, cur(), rows, now=at("12:30"))
+        assert r["rating"] == "Storms"
+
+    def test_storm_beyond_three_hours_of_now_ignored(self):
+        # Bug: lookahead counted past rows' span, flagging a storm 4 h after now.
+        rows = hours(0, 0, 0, 0, 0, start=13, codes={4: 95})
+        assert swim_comfort(84, cur(), rows, now=at("13:00"))["rating"] != "Storms"
+
+
+class TestNeverRaises:
+    # Bug for all: a TypeError/AttributeError on odd input (the route hides it, but
+    # the note then silently vanishes for every guest).
+    @pytest.mark.parametrize("upcoming", [5, "abc", [None, "x", 3, {"time": 5},
+                                          {"time": None}, {}], object()])
+    def test_odd_upcoming(self, upcoming):
+        assert swim_comfort(84, cur(), upcoming)["rating"]
+
+    def test_mixed_naive_and_aware_times(self):
+        from datetime import datetime
+        rows = [{"time": "2026-10-07T13:00", "precip_prob": 0, "code": 1},
+                {"time": "2026-10-07T14:00-04:00", "precip_prob": 70, "code": 61}]
+        assert swim_comfort(84, cur(), rows, now=datetime(2026, 10, 7, 13, 5))["rating"]
+        assert swim_comfort(84, cur(), rows, now=at("13:05"))["rating"]
+        assert swim_comfort(84, cur(), rows[:1], now=at("13:05"))["rating"]
+
+    def test_naive_now_is_read_on_the_forecast_clock(self, monkeypatch):
+        # Bug: a naive `now` is read in the server's own zone (UTC here), so 14:50 at
+        # the pool becomes 10:50 and 15:00 rain reads "by 3 PM" instead of "soon".
+        import time
+        from datetime import datetime
+        monkeypatch.setenv("TZ", "UTC")
+        time.tzset()
+        try:
+            r = swim_comfort(84, cur(), quarter_hours("14:45", [10, 70]),
+                             now=datetime(2026, 10, 7, 14, 50))
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+        assert "rain likely soon" in r["text"]
+
+    def test_none_and_odd_fields(self):
+        c = {"temp_f": 80, "feels_like_f": None, "wind_mph": "x", "humidity": None,
+             "cloud_cover": float("nan"), "icon": ["rain"], "code": None, "is_day": None}
+        assert swim_comfort(84, c, [{"time": "2026-10-07T13:00-04:00", "precip_prob": None,
+                                     "code": "95"}])["rating"]
+        assert swim_comfort("84", c, None, now="noon")["rating"]

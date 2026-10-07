@@ -351,7 +351,9 @@ def build_payload(raw: dict[str, Any], cfg: Config, now: datetime,
     if not rows:
         raise ValueError("no forecast rows for the next 6 hours")
     rows = [dict(r, dt=r["dt"].replace(tzinfo=fixed).astimezone(tz).replace(tzinfo=None)) for r in rows]
-    is_day = cur.get("is_day") == 1
+    # A missing is_day is not "night": fall back to the local hour (7-19 is day).
+    is_day = (cur.get("is_day") == 1 if cur.get("is_day") is not None
+              else 7 <= now.hour < 19)
     desc, icon = describe(cur.get("weather_code"), is_day)
     current = {
         "temp_f": rnd(_num(cur.get("temperature_2m"))),
@@ -362,6 +364,7 @@ def build_payload(raw: dict[str, Any], cfg: Config, now: datetime,
         "precip_prob": rows[0]["precip_prob"],
         "description": desc,
         "icon": icon,
+        "code": _int(cur.get("weather_code")),
         "is_day": is_day,
     }
     return {
@@ -434,6 +437,10 @@ class WeatherService:
         # Aware; build_payload converts it into the response's own fixed offset.
         return datetime.fromtimestamp(self._clock(), UTC)
 
+    def now(self) -> datetime:
+        """The service's current time (aware UTC); the same clock the cache uses."""
+        return self._now_local()
+
     async def _refresh_if_due(self) -> None:
         if self._clock() < self._next_try:
             return
@@ -484,30 +491,69 @@ def get_service() -> WeatherService:
     return _service
 
 
-def pool_water_f(request: Request) -> float | None:
-    """The pool's water temperature in °F from the pool service's last snapshot, or
-    None (no service, controller offline, pump off / sensor blank, implausible value).
-    Reads only what the page's own /api/state polls already keep fresh; never polls."""
+POOL_SNAPSHOT_MAX_AGE = timedelta(minutes=5)   # older pool readings aren't "now"
+SWIM_WEATHER_MAX_AGE = timedelta(minutes=60)   # older weather can't drive "right now"
+
+
+def pool_water_f(request: Request) -> tuple[float | None, str | None]:
+    """(water °F, None) from the pool service's last snapshot, or (None, reason) with
+    reason "offline", "spa" (spa mode: the pool sensor isn't read), "pump_off" or
+    "unknown" (no service, old snapshot, implausible value).
+    Reads only what the page's own /api/state polls keep fresh; never polls. After an
+    idle spell the weather request can land before the page's first /api/state
+    refresh, so a snapshot older than POOL_SNAPSHOT_MAX_AGE is treated as unknown."""
     svc = getattr(request.app.state, "svc", None)
     snap = getattr(svc, "snap", None)
-    if snap is None or not getattr(snap, "connected", False):
-        return None
+    if snap is None:
+        return None, "unknown"
+    if not getattr(snap, "connected", False):
+        return None, "offline"
+    at = getattr(svc, "updated_at", None)
+    if isinstance(at, datetime):
+        if at.tzinfo is None:
+            at = at.astimezone()
+        if datetime.now(UTC) - at > POOL_SNAPSHOT_MAX_AGE:
+            return None, "unknown"
     t = _num(getattr(snap, "pool_temp", None))
     if t is None:
-        return None
+        if getattr(snap, "spa_mode", False):
+            return None, "spa"
+        if not getattr(snap, "filter_pump", False):
+            return None, "pump_off"
+        return None, "unknown"
     if str(getattr(snap, "unit", "F")).upper().startswith("C"):
         t = t * 9 / 5 + 32
-    return t if 33 <= t <= 110 else None
+    return (t, None) if 33 <= t <= 110 else (None, "unknown")
 
 
-def add_swim(data: dict[str, Any], water_f: float | None) -> dict[str, Any]:
-    """Attach the swim comfort note to an available payload. Never raises: on any
-    error the payload is returned without `swim`, so weather still shows."""
+def _weather_fresh(data: dict[str, Any], now: datetime) -> bool:
+    """False when the payload is stale (refresh failing) or older than
+    SWIM_WEATHER_MAX_AGE: the swim note describes *right now*."""
+    if data.get("stale"):
+        return False
+    try:
+        at = datetime.fromisoformat(data["updated_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if at.tzinfo is None:
+        at = at.astimezone()
+    return now - at <= SWIM_WEATHER_MAX_AGE
+
+
+def add_swim(data: dict[str, Any], water_f: float | None, reason: str | None = None,
+             now: datetime | None = None) -> dict[str, Any]:
+    """Attach the swim comfort note to an available, fresh payload. Never raises: on
+    any error (or old weather) the payload is returned without `swim`, so weather
+    still shows. `now` is aware (defaults to the current time)."""
     if not data.get("available"):
         return data
     try:
+        now = now or datetime.now(UTC)
+        if not _weather_fresh(data, now):
+            return data
         cur = data.get("current") or {}
-        swim = swim_comfort(water_f, cur, data.get("hourly") or [], cur.get("is_day"))
+        swim = swim_comfort(water_f, cur, data.get("hourly") or [], cur.get("is_day"),
+                            now=now, water_reason=reason)
     except Exception as exc:  # noqa: BLE001 - comfort must never break weather
         log.warning("swim comfort failed: %s", exc)
         return data
@@ -516,10 +562,15 @@ def add_swim(data: dict[str, Any], water_f: float | None) -> dict[str, Any]:
 
 @router.get("/api/weather")
 async def weather(request: Request):
-    data = await get_service().get()
+    service = get_service()
+    data = await service.get()
     try:
-        water = pool_water_f(request)
+        water, reason = pool_water_f(request)
     except Exception as exc:  # noqa: BLE001
         log.warning("pool temp unavailable for swim comfort: %s", exc)
-        water = None
-    return JSONResponse(add_swim(data, water), headers={"Cache-Control": "no-store"})
+        water, reason = None, "unknown"
+    try:
+        now = service.now()
+    except Exception:  # noqa: BLE001
+        now = None
+    return JSONResponse(add_swim(data, water, reason, now), headers={"Cache-Control": "no-store"})
