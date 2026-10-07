@@ -47,6 +47,10 @@
 
   function deg(v) { return Math.round(v) + "°"; }
 
+  // Humidity is optional per row (null where the forecast has none).
+  function hum(r) { var v = num(r.humidity); return v == null ? null : Math.round(v); }
+  function hasHumidity(rows) { return rows.some(function (r) { return hum(r) != null; }); }
+
   // ------------------------------------------------------------------ icons
   // Static markup only (no data interpolated), 48x48 viewBox.
 
@@ -133,7 +137,9 @@
 
     var legend = el("ul", "wx-legend");
     legend.setAttribute("aria-hidden", "true");
-    [["temp", "Temp"], ["rain", "Rain %"], ["cloud", "Clouds"]].forEach(function (p) {
+    var keys = [["temp", "Temp"], ["rain", "Rain %"], ["cloud", "Clouds"]];
+    if (hasHumidity(d.hourly)) keys.push(["hum", "Humidity"]);
+    keys.forEach(function (p) {
       var li = el("li");
       li.appendChild(el("span", "wx-key " + p[0]));
       li.appendChild(document.createTextNode(p[1]));
@@ -156,12 +162,17 @@
     wrap.appendChild(tbl);
     tbl.appendChild(el("caption", null, "Forecast, next 6 hours"));
     var hr = el("tr");
-    ["Time", "Temp", "Rain chance", "Cloud cover"].forEach(function (h) { hr.appendChild(el("th", null, h)); });
+    var withHum = hasHumidity(rows);
+    var heads = ["Time", "Temp", "Rain chance", "Cloud cover"];
+    if (withHum) heads.push("Humidity");
+    heads.forEach(function (h) { hr.appendChild(el("th", null, h)); });
     tbl.appendChild(hr);
     rows.forEach(function (r, i) {
       if (rows.length > 8 && !/:00/.test(r.time.slice(11, 16)) && i !== 0) return; // hourly is enough
       var tr = el("tr");
-      [clock(r.time, true), deg(r.temp_f), r.precip_prob + "%", r.cloud_cover + "%"].forEach(function (v) {
+      var cells = [clock(r.time, true), deg(r.temp_f), r.precip_prob + "%", r.cloud_cover + "%"];
+      if (withHum) cells.push(hum(r) == null ? "no data" : hum(r) + "%");
+      cells.forEach(function (v) {
         tr.appendChild(el("td", null, v));
       });
       tbl.appendChild(tr);
@@ -174,10 +185,14 @@
     var rain = rows.map(function (r) { return r.precip_prob; });
     var clouds = rows.map(function (r) { return r.cloud_cover; });
     var avg = clouds.reduce(function (a, b) { return a + b; }, 0) / clouds.length;
+    var hs = rows.map(hum).filter(function (v) { return v != null; });
+    var humTxt = !hs.length ? "" : (Math.min.apply(null, hs) === Math.max.apply(null, hs)
+      ? " Humidity " + hs[0] + "%."
+      : " Humidity between " + Math.min.apply(null, hs) + "% and " + Math.max.apply(null, hs) + "%.");
     return "Chart of the next 6 hours, " + clock(rows[0].time) + " to " + clock(rows[rows.length - 1].time) +
       ". Temperature from " + deg(temps[0]) + " to " + deg(temps[temps.length - 1]) +
       ", high " + deg(Math.max.apply(null, temps)) + ", low " + deg(Math.min.apply(null, temps)) +
-      ". Rain chance up to " + Math.max.apply(null, rain) + "%. Cloud cover averages " + Math.round(avg) + "%.";
+      ". Rain chance up to " + Math.max.apply(null, rain) + "%. Cloud cover averages " + Math.round(avg) + "%." + humTxt;
   }
 
   // Temperature scale for the left axis: four equal steps of a round size, so
@@ -252,6 +267,22 @@
       s.appendChild(svg("line", { "class": "grid", x1: x0, x2: x1, y1: y, y2: y }));
     });
     s.appendChild(svg("line", { "class": "base", x1: x0, x2: x1, y1: base + .5, y2: base + .5 }));
+
+    // Humidity: green dashed line on the % scale, over the clouds and under the
+    // rain/temperature lines. Breaks where a reading is missing; a lone reading
+    // between gaps gets a small dot so it isn't lost.
+    var hums = rows.map(hum);
+    var humLine = "", prevH = false;
+    hums.forEach(function (v, i) {
+      if (v == null) { prevH = false; return; }
+      humLine += (prevH ? "L" : "M") + xs[i].toFixed(1) + " " + py(v).toFixed(1);
+      if (!prevH && (i === hums.length - 1 || hums[i + 1] == null)) {
+        s.appendChild(svg("circle", { "class": "dot-hum-solo", cx: xs[i], cy: py(v), r: 2 }));
+      }
+      prevH = true;
+    });
+    if (humLine) s.appendChild(svg("path", { "class": "hum", d: humLine }));
+
     s.appendChild(svg("path", { "class": "rain", d: rainLine }));
 
     // Temperature: red line on top (°F scale).
@@ -263,18 +294,68 @@
     // sits inside the plot (clear of both axes' labels) on the side of the
     // point the line isn't heading toward.
     var last = rows.length - 1;
-    var placed = [];   // label boxes, for the rain-peak collision check
+    var placed = [];   // label boxes, for the %-label collision checks
+    // Screen y of a series at plot x (linear between rows; null across a gap).
+    var tempYs = temps.map(ty);
+    var rain = rows.map(function (r) { return r.precip_prob; });
+    var rainYs = rain.map(py);
+    var humYs = hums.map(function (v) { return v == null ? null : py(v); });
+    function yAt(ys, lx) {
+      var j = 1;
+      while (j < last && xs[j] < lx) j++;
+      var a = ys[j - 1], b = ys[j];
+      if (a == null || b == null) return null;
+      var f = Math.max(0, Math.min(1, (lx - xs[j - 1]) / ((xs[j] - xs[j - 1]) || 1)));
+      return a + (b - a) * f;
+    }
+    // Would a label of width tw, baseline ly, left edge bx overlap a placed
+    // label or cross one of the given lines?
+    function blocked(bx, ly, tw, lines) {
+      if (placed.some(function (b) {
+        return bx < b.x + b.w && bx + tw > b.x && ly - 11 < b.y + b.h && ly + 2 > b.y;
+      })) return true;
+      for (var lx = bx - 3; lx <= bx + tw + 3; lx += 2) {
+        for (var k = 0; k < lines.length; k++) {
+          var yy = yAt(lines[k], lx);
+          if (yy != null && yy > ly - 16 && yy < ly + 7) return true;
+        }
+      }
+      return false;
+    }
+    // Place a % label beside point (px, py0): above, else below; null if neither fits.
+    function pctLabel(px, py0, txt, lines) {
+      var anchor = px < x0 + 20 ? "start" : (px > x1 - 20 ? "end" : "middle");
+      var tw = txt.length * 7 + 2;
+      var bx = anchor === "start" ? px : anchor === "end" ? px - tw : px - tw / 2;
+      var tries = [py0 - 8, py0 + 17];
+      for (var k = 0; k < tries.length; k++) {
+        var ly = tries[k];
+        if (ly - 11 < top - 4 || ly > base - 2) continue;
+        if (!blocked(bx, ly, tw, lines)) {
+          placed.push({ x: bx, y: ly - 11, w: tw, h: 13 });
+          return { x: px, y: ly, anchor: anchor };
+        }
+      }
+      return null;
+    }
+
     function put(x, y, anchor, text) {
       var w = text.length * 7 + 2;
       var bx = anchor === "start" ? x : anchor === "end" ? x - w : x - w / 2;
       placed.push({ x: bx, y: y - 11, w: w, h: 13 });
       s.appendChild(svg("text", { "class": "lbl", x: x, y: y, "text-anchor": anchor }, text));
     }
-    function side(i, j) {   // "above" unless the neighbour j is higher, or no room
+    function side(i, j, anchor) {   // "above" unless the neighbour j is higher, or no room
       var y = ty(temps[i]), yn = ty(temps[j]);
       var up = !(yn < y - 3);
       if (up && y - 9 < top + 2) up = false;
       if (!up && y + 18 > base - 2) up = true;
+      // Flip if that spot sits on the humidity line and the other side is clear.
+      var txt = deg(temps[i]), w = txt.length * 7 + 2;
+      var bx = anchor === "start" ? xs[i] + 2 : xs[i] - 2 - w;
+      var alt = up ? y + 18 : y - 9;
+      if (alt >= top + 2 && alt <= base - 2 &&
+          blocked(bx, up ? y - 9 : y + 18, w, [humYs]) && !blocked(bx, alt, w, [humYs])) up = !up;
       return up ? y - 9 : y + 18;
     }
     var labels = [{ i: 0, pos: "start" }, { i: last, pos: "end" }];
@@ -288,35 +369,34 @@
         if (x - xs[0] < 40 || xs[last] - x < 40) return;  // would collide with an end label
       }
       s.appendChild(svg("circle", { "class": "dot-temp", cx: x, cy: y, r: 4 }));
-      if (L.pos === "start") put(x + 2, side(0, Math.min(1, last)), "start", txt);
-      else if (L.pos === "end") put(x - 2, side(last, Math.max(0, last - 1)), "end", txt);
+      if (L.pos === "start") put(x + 2, side(0, Math.min(1, last), "start"), "start", txt);
+      else if (L.pos === "end") put(x - 2, side(last, Math.max(0, last - 1), "end"), "end", txt);
       else if (L.pos === "above") put(x, y - 9 < top + 2 ? y + 18 : y - 9, "middle", txt);
       else put(x, y + 18 > base - 2 ? y - 9 : y + 18, "middle", txt);
     });
 
     // Rain peak label when there's a meaningful chance and room for it.
-    var rain = rows.map(function (r) { return r.precip_prob; });
     var rMax = Math.max.apply(null, rain);
     if (rMax >= 10) {
       var ri = rain.indexOf(rMax), rx = xs[ri], ry = py(rMax);
-      var anchor = rx < x0 + 20 ? "start" : (rx > x1 - 20 ? "end" : "middle");
-      var txt = rMax + "%", tw = txt.length * 7 + 2;
-      var ly = ry - 8 < top + 2 ? ry + 17 : ry - 8;
-      var bx = anchor === "start" ? rx : anchor === "end" ? rx - tw : rx - tw / 2;
-      var hit = placed.some(function (b) {
-        return bx < b.x + b.w && bx + tw > b.x && ly - 11 < b.y + b.h && ly + 2 > b.y;
-      });
-      // ...and clear of the temperature line itself.
-      for (var lx = bx - 3; lx <= bx + tw + 3 && !hit; lx += 2) {
-        var j = 1;
-        while (j < last && xs[j] < lx) j++;
-        var f = Math.max(0, Math.min(1, (lx - xs[j - 1]) / ((xs[j] - xs[j - 1]) || 1)));
-        var ly2 = ty(temps[j - 1] + (temps[j] - temps[j - 1]) * f);
-        hit = ly2 > ly - 16 && ly2 < ly + 7;
-      }
-      if (!hit) {
+      // Prefer a spot clear of the humidity line too, but the rain peak matters
+      // more than that: if only the humidity line is in the way, label anyway.
+      var rl = pctLabel(rx, ry, rMax + "%", [tempYs, humYs]) || pctLabel(rx, ry, rMax + "%", [tempYs]);
+      if (rl) {
         s.appendChild(svg("circle", { "class": "dot-rain", cx: rx, cy: ry, r: 4 }));
-        s.appendChild(svg("text", { "class": "lbl lbl-rain", x: rx, y: ly, "text-anchor": anchor }, txt));
+        s.appendChild(svg("text", { "class": "lbl lbl-rain", x: rl.x, y: rl.y, "text-anchor": rl.anchor }, rMax + "%"));
+      }
+    }
+
+    // Humidity: one direct label on its latest reading (the green line's
+    // identity doesn't then rest on color alone), if it fits clear of the rest.
+    var hi = hums.length - 1;
+    while (hi >= 0 && hums[hi] == null) hi--;
+    if (hi >= 0) {
+      var hl = pctLabel(xs[hi], py(hums[hi]), hums[hi] + "%", [tempYs, rainYs]);
+      if (hl) {
+        s.appendChild(svg("circle", { "class": "dot-hum", cx: xs[hi], cy: py(hums[hi]), r: 4 }));
+        s.appendChild(svg("text", { "class": "lbl lbl-hum", x: hl.x, y: hl.y, "text-anchor": hl.anchor }, hums[hi] + "%"));
       }
     }
 
@@ -336,7 +416,8 @@
     var vline = svg("line", { "class": "cross", y1: top, y2: base });
     var cdT = svg("circle", { "class": "dot-temp", r: 4 });
     var cdR = svg("circle", { "class": "dot-rain", r: 4 });
-    cross.appendChild(vline); cross.appendChild(cdT); cross.appendChild(cdR);
+    var cdH = svg("circle", { "class": "dot-hum", r: 4 });
+    cross.appendChild(vline); cross.appendChild(cdH); cross.appendChild(cdR); cross.appendChild(cdT);
     s.appendChild(cross);
     host.appendChild(s);
 
@@ -360,12 +441,16 @@
       vline.setAttribute("x1", Math.round(x) + .5); vline.setAttribute("x2", Math.round(x) + .5);
       cdT.setAttribute("cx", x); cdT.setAttribute("cy", ty(r.temp_f));
       cdR.setAttribute("cx", x); cdR.setAttribute("cy", py(r.precip_prob));
+      var h = hums[i];
+      if (h == null) cdH.setAttribute("visibility", "hidden");
+      else { cdH.setAttribute("visibility", "inherit"); cdH.setAttribute("cx", x); cdH.setAttribute("cy", py(h)); }
       cross.setAttribute("visibility", "visible");
       tip.textContent = "";
       tip.appendChild(el("div", "t", clock(r.time, true)));
       tip.appendChild(tipRow("temp", deg(r.temp_f), "Temp"));
       tip.appendChild(tipRow("rain", r.precip_prob + "%", "Rain"));
       tip.appendChild(tipRow("cloud", r.cloud_cover + "%", "Clouds"));
+      if (humLine) tip.appendChild(tipRow("hum", h == null ? "–" : h + "%", "Humidity"));
       tip.hidden = false;
       var tw = tip.offsetWidth;
       var left = x + 12;

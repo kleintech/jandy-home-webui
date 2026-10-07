@@ -1,7 +1,7 @@
 """Short-range weather for the guest page (Open-Meteo, no API key).
 
 `GET /api/weather` returns current conditions, the next ~6 hours of temperature,
-rain chance and cloud cover, and a one-line summary. Data is fetched lazily on
+rain chance, cloud cover and humidity, and a one-line summary. Data is fetched lazily on
 request, cached for 10 minutes, and the last good response is served if a refresh
 fails. Nothing here touches the pool controller; a weather failure only ever
 produces ``{"available": false}`` or a stale payload.
@@ -36,7 +36,10 @@ RETRY_SECONDS = 60        # after a failed refresh, wait this long before trying
 TIMEOUT_SECONDS = 8.0
 WINDOW = timedelta(hours=6)
 
-SERIES_VARS = "temperature_2m,precipitation_probability,cloud_cover,weather_code,is_day"
+SERIES_VARS = (
+    "temperature_2m,precipitation_probability,cloud_cover,relative_humidity_2m,"
+    "weather_code,is_day"
+)
 CURRENT_VARS = (
     "temperature_2m,apparent_temperature,relative_humidity_2m,"
     "wind_speed_10m,cloud_cover,weather_code,is_day"
@@ -167,16 +170,28 @@ def _int(v: Any) -> int | None:
     return None if n is None else rnd(n)
 
 
+def _pct(v: Any) -> int | None:
+    """A 0-100 percentage, or None if absent or out of range."""
+    n = _int(v)
+    return n if n is not None and 0 <= n <= 100 else None
+
+
 def _series(block: Any) -> list[dict[str, Any]] | None:
     """Turn an Open-Meteo column block into rows; None if unusable."""
     if not isinstance(block, dict) or not isinstance(block.get("time"), list):
         return None
     times = block["time"]
     cols = {k: block.get(k) for k in ("temperature_2m", "precipitation_probability",
-                                      "cloud_cover", "weather_code", "is_day")}
+                                      "cloud_cover", "relative_humidity_2m",
+                                      "weather_code", "is_day")}
     for k in ("temperature_2m", "precipitation_probability", "cloud_cover"):
         if not isinstance(cols[k], list) or len(cols[k]) != len(times):
             return None
+    # Humidity is optional (older responses, models without it): a missing or
+    # misaligned column means "no humidity", never "unusable series".
+    hum = cols["relative_humidity_2m"]
+    if not isinstance(hum, list) or len(hum) != len(times):
+        cols["relative_humidity_2m"] = None
     rows = []
     for i, t in enumerate(times):
         try:
@@ -191,6 +206,7 @@ def _series(block: Any) -> list[dict[str, Any]] | None:
             "temp_f": _num(col("temperature_2m")),
             "precip_prob": _int(col("precipitation_probability")),
             "cloud_cover": _int(col("cloud_cover")),
+            "humidity": _pct(col("relative_humidity_2m")),
             "code": _int(col("weather_code")),
             "is_day": col("is_day"),
         })
@@ -207,6 +223,7 @@ def _window(rows: list[dict[str, Any]], now: datetime, step: timedelta) -> list[
 
 
 def _complete(rows: list[dict[str, Any]]) -> bool:
+    # Humidity is deliberately not required: it is drawn with gaps where null.
     return len(rows) >= 2 and all(
         r["temp_f"] is not None and r["precip_prob"] is not None and r["cloud_cover"] is not None
         for r in rows
@@ -357,6 +374,7 @@ def build_payload(raw: dict[str, Any], cfg: Config, now: datetime,
                 "temp_f": round(r["temp_f"], 1),
                 "precip_prob": r["precip_prob"],
                 "cloud_cover": r["cloud_cover"],
+                "humidity": r.get("humidity"),
             }
             for r in rows
         ],

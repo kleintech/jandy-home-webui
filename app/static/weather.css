@@ -1,9 +1,11 @@
 /* Weather card. Reuses app.css tokens (--card, --text, --muted, --border, --radius);
-   adds chart colors validated for both surfaces (red/blue pass CVD + 3:1 contrast). */
+   adds chart colors validated for both surfaces (red/blue/green pass the dataviz
+   validator all-pairs: CVD dE >= 8.5, >= 3:1 on the card; humidity is also dashed). */
 
 :root {
   --wx-temp: #e34948;
   --wx-rain: #2a78d6;
+  --wx-hum: #008a00;
   --wx-cloud: #dfe4ea;
   --wx-grid: rgba(71, 85, 105, .16);   /* translucent: drawn over the cloud area */
   --wx-sun: #f2a516;
@@ -15,6 +17,7 @@
   :root {
     --wx-temp: #e66767;
     --wx-rain: #3987e5;
+    --wx-hum: #1a9a1a;
     --wx-cloud: #2a3542;
     --wx-grid: rgba(148, 163, 184, .16);
     --wx-sun: #f5b83d;
@@ -73,7 +76,8 @@
 
 .wx-legend {
   display: flex;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 4px 12px;
   margin: 12px 0 2px;
   padding: 0;
   list-style: none;
@@ -84,6 +88,10 @@
 .wx-key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
 .wx-key.temp { background: var(--wx-temp); }
 .wx-key.rain { background: var(--wx-rain); }
+/* Dashed swatch, matching the dashed humidity line. */
+.wx-key.hum {
+  background: repeating-linear-gradient(90deg, var(--wx-hum) 0 5px, transparent 5px 8px);
+}
 .wx-key.cloud { height: 10px; width: 12px; border-radius: 2px; background: var(--wx-cloud); }
 
 .wx-chart {
@@ -103,6 +111,9 @@
 .wx-chart .rain-area { fill: var(--wx-rain); fill-opacity: .12; }
 .wx-chart .rain { fill: none; stroke: var(--wx-rain); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .wx-chart .temp { fill: none; stroke: var(--wx-temp); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.wx-chart .hum { fill: none; stroke: var(--wx-hum); stroke-width: 2; stroke-dasharray: 5 3; stroke-linejoin: round; }
+.wx-chart .dot-hum { fill: var(--wx-hum); stroke: var(--card); stroke-width: 2; }
+.wx-chart .dot-hum-solo { fill: var(--wx-hum); }
 .wx-chart .dot-temp { fill: var(--wx-temp); stroke: var(--card); stroke-width: 2; }
 .wx-chart .dot-rain { fill: var(--wx-rain); stroke: var(--card); stroke-width: 2; }
 .wx-chart .lbl { fill: var(--text); font-size: 12px; font-weight: 600; }

@@ -150,6 +150,9 @@ main {
   box-shadow: var(--shadow);
   padding: 16px 16px 8px;
 }
+/* The weather card's own "Weather" heading (rendered by weather.js); the
+   section keeps aria-label="Weather" as its accessible name. */
+#wx-h { display: none; }
 .card h2 {
   margin: 0 0 12px;
   font-size: 13px;
@@ -266,89 +269,54 @@ body.offline main { opacity: .6; }
 }
 
 /* ---------- Light row ---------- */
-/* The toggle spans the whole row (big tap target); the color circle sits on top
-   of it, just left of the switch. */
+/* "Light (switch) | Color (circle)": two buttons that split the row in equal
+   halves with no gap, so every point of the row belongs to exactly one of them.
+   With no colors the color button is hidden and the toggle takes the full row. */
 .light-row {
   display: grid;
-  /* column 1 keeps the "Light" label clear of the color pill */
-  grid-template-columns: 60px minmax(0, 1fr);
-  justify-items: end;
-  align-items: center;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   margin-top: 12px;
+  border-top: 1px solid var(--border);
 }
-.light-row .toggle { grid-column: 1 / -1; grid-row: 1; }
+.light-row .toggle { border-top: 0; padding-right: 12px; }
+.light-row .toggle-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Grid items default to min-width:auto; let long labels ellipsize instead of
    widening the card past the screen. */
 main > * { min-width: 0; }
-.color-dot {
-  grid-column: 2;
-  grid-row: 1;
-  position: relative;
-  z-index: 1;
+.color-btn {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  /* Hit box is the full row height and reaches the switch, so a near-miss on
-     the pill opens the color sheet instead of toggling the light. */
-  min-width: 64px;
-  max-width: calc(100% - 56px);   /* grid area minus the switch margin */
-  height: 56px;
-  margin: 0 56px 0 0;     /* the 56px switch */
-  padding: 0 6px 0 4px;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  min-height: 60px;
+  margin: 0;
+  padding: 6px 2px 6px 14px;
   border: 0;
-  border-radius: 12px;
-  background: transparent;
+  /* Divider between the halves, painted as the button's own background. Not a
+     pseudo-element: a thin child box sitting on the boundary wins Chromium's
+     touch adjustment, so taps just left of it opened the sheet instead of
+     toggling the light. */
+  background: linear-gradient(var(--border), var(--border)) left center / 1px calc(100% - 32px) no-repeat;
+  text-align: left;
   cursor: pointer;
 }
-/* A labelled pill (swatch + "Color" + current name + chevron) so it reads as a
-   picker, not decoration — a white swatch alone looked like nothing. */
-.color-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  max-width: 100%;
-  padding: 5px 8px 5px 5px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--seg-bg);
-}
-.color-dot .chip-swatch {
+.color-btn .color-circle {
   flex: none;
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
   box-shadow: none;
 }
-.color-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  line-height: 1.1;
-  text-align: left;
-}
-.color-cap {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.color-name {
-  font-size: 15px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.color-pill .chev { flex: none; color: var(--muted); margin-left: -2px; }
+.color-btn:disabled { cursor: default; }
+.color-btn:disabled .toggle-label { color: var(--muted); }
+.color-btn:disabled .color-circle { opacity: .45; }
+.color-btn.pending .color-circle { animation: pulse 1s ease-in-out infinite; }
 @media (max-width: 359px) {
-  /* 320px phones: give the color name the room (the pill still reads as a button) */
-  .color-pill { gap: 6px; padding-right: 10px; }
-  .color-pill .chev { display: none; }
-  .color-dot .chip-swatch { width: 26px; height: 26px; }
+  .light-row .toggle { gap: 8px; padding-right: 8px; }
+  .color-btn { gap: 8px; padding-left: 10px; }
 }
-.color-dot:disabled { cursor: default; opacity: .45; }
-.color-dot.pending .chip-swatch { animation: pulse 1s ease-in-out infinite; }
 
 /* ---------- Color sheet ---------- */
 dialog.sheet {
@@ -475,6 +443,9 @@ dialog.sheet::backdrop { background: rgba(2, 6, 12, .5); }
   font-size: 16px;
   font-weight: 700;
 }
+.card > .subhead:first-child { margin-top: 2px; }
+/* Water/Air readings head the Function card, above the mode switcher. */
+.temps + .segmented { margin-top: 14px; }
 /* Set points. Phones: the number(s) sit above a full-width bar (Heat left,
    Chill right). Wider screens: the numbers flank the bar in one row (spa: the
    number sits right of the bar). */
@@ -653,7 +624,7 @@ input[type="range"]::-moz-range-thumb {
 /* ---------- Focus ---------- */
 :focus { outline: none; }
 .seg:focus-visible, .toggle:focus-visible, .chip:focus-visible,
-.color-dot:focus-visible, .sheet-close:focus-visible {
+.color-btn:focus-visible, .sheet-close:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
 }

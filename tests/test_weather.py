@@ -374,3 +374,94 @@ def test_zip_is_geocoded_once_then_cached(monkeypatch, raw):
     assert lookups == ["28411"]
     assert fetched_with == [(34.3, -77.8), (34.3, -77.8)]
     assert p["location"] == "Wilmington, NC"
+
+
+# ---------------------------------------------------------------- humidity (optional series)
+
+def add_humidity(raw, key, fn):
+    """Give `key` a relative_humidity_2m column computed from each row's time string."""
+    raw[key]["relative_humidity_2m"] = [fn(t) for t in raw[key]["time"]]
+
+
+def _minute_stamp(t):
+    # "2026-10-07T13:45" -> 1345, a distinct per-slot value to check alignment.
+    return int(t[11:13]) * 100 + int(t[14:16])
+
+
+class TestHumidity:
+    def test_request_asks_for_humidity_series(self):
+        # Bug: humidity added to the payload code but never requested from
+        # Open-Meteo, so the chart line is always empty in production.
+        p = CFG.params()
+        assert "relative_humidity_2m" in p["minutely_15"].split(",")
+        assert "relative_humidity_2m" in p["hourly"].split(",")
+
+    def test_missing_humidity_keeps_15_minute_series(self, raw):
+        # Bug: humidity treated as a required column, so the recorded fixture (no
+        # humidity in its series) falls back to hourly or is rejected outright.
+        assert "relative_humidity_2m" not in raw["minutely_15"]
+        p = payload(raw)
+        assert p["step_minutes"] == 15
+        assert len(p["hourly"]) == 25
+        assert all(h["humidity"] is None for h in p["hourly"])
+
+    def test_humidity_mapped_to_matching_timestamps(self, raw):
+        # Bug: humidity column read with an offset (e.g. from the start of the
+        # response rather than the window), so values land on the wrong times.
+        add_humidity(raw, "minutely_15", lambda t: _minute_stamp(t) % 101)
+        p = payload(raw)
+        for h in p["hourly"]:
+            hhmm = h["time"][11:16].replace(":", "")
+            assert h["humidity"] == int(hhmm) % 101, h
+
+    def test_null_humidity_slots_dont_drop_15_minute_series(self, raw):
+        # Bug: a null humidity reading (model gap) counted as an "incomplete" slot,
+        # silently downgrading the chart to hourly; nulls must pass through as gaps.
+        add_humidity(raw, "minutely_15", lambda t: 60)
+        set_series(raw, "minutely_15", "relative_humidity_2m", {"15:00": None, "15:15": None})
+        p = payload(raw)
+        assert p["step_minutes"] == 15
+        by_time = {h["time"][11:16]: h["humidity"] for h in p["hourly"]}
+        assert by_time["15:00"] is None and by_time["15:15"] is None
+        assert by_time["14:45"] == 60 and by_time["15:30"] == 60
+
+    def test_misaligned_humidity_column_ignored_not_fatal(self, raw):
+        # Bug: a humidity column shorter than `time` either rejects the whole series
+        # (falling back / no weather) or shifts values onto the wrong rows.
+        raw["minutely_15"]["relative_humidity_2m"] = [50] * 3
+        p = payload(raw)
+        assert p["step_minutes"] == 15
+        assert all(h["humidity"] is None for h in p["hourly"])
+
+    def test_humidity_rounded_and_out_of_range_dropped(self, raw):
+        # Bug: fractional/bogus humidity (e.g. 64.5 shown as 64 by banker's rounding,
+        # or a sentinel like -999 / 150) reaching the chart's 0-100% axis.
+        add_humidity(raw, "minutely_15", lambda t: 50)
+        set_series(raw, "minutely_15", "relative_humidity_2m",
+                   {"14:00": 64.5, "14:15": -999, "14:30": 150, "14:45": True})
+        by_time = {h["time"][11:16]: h["humidity"] for h in payload(raw)["hourly"]}
+        assert by_time["14:00"] == 65
+        assert by_time["14:15"] is None and by_time["14:30"] is None
+        assert by_time["14:45"] is None
+
+    def test_hourly_fallback_carries_hourly_humidity(self, raw):
+        # Bug: on hourly fallback the humidity is still read from (or expected in)
+        # the 15-minute block, so the fallback chart loses its humidity line.
+        add_humidity(raw, "hourly", lambda t: int(t[11:13]) + 40)
+        del raw["minutely_15"]
+        p = payload(raw)
+        assert p["step_minutes"] == 60
+        assert [h["humidity"] for h in p["hourly"]] == [53, 54, 55, 56, 57, 58, 59]
+
+    def test_route_serializes_humidity_null_as_json_null(self, monkeypatch, raw):
+        # Bug: a None/NaN humidity breaks JSON encoding of /api/weather (500) or is
+        # emitted as a non-JSON token the browser can't parse.
+        add_humidity(raw, "minutely_15", lambda t: None if t.endswith(":15") else 70)
+        monkeypatch.setattr(weather, "_service",
+                            WeatherService(CFG, fetcher=Fetcher(raw), clock=Clock()))
+        app = FastAPI()
+        app.include_router(weather.router)
+        r = TestClient(app).get("/api/weather")
+        assert r.status_code == 200
+        hum = [h["humidity"] for h in r.json()["hourly"]]
+        assert None in hum and 70 in hum

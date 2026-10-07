@@ -34,7 +34,6 @@
     light: $('t-light'),
     colorBtn: $('light-color'),
     colorSwatch: $('light-swatch'),
-    colorName: $('light-color-name'),
     sheet: $('color-sheet'),
     sheetClose: $('color-close'),
     chips: $('chips'),
@@ -700,7 +699,6 @@
     el.colorSwatch.style.setProperty('--sw', swatchFor(color));
     el.colorBtn.setAttribute('aria-label', `Light color: ${color}, change`);
     el.colorBtn.title = 'Change the light color';
-    el.colorName.textContent = color;
     if (colors.length) renderChips(colors, color, connected, colorPending);
     if (el.sheet.open && (colors.length === 0 || light.available === false || !connected)) closeSheet();
 
