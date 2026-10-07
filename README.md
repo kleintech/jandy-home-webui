@@ -93,7 +93,9 @@ the heat pump command `setpoint_hpm_temp`. Bump the pin on purpose, and rerun th
 
 The image is `registry.lab.kleincogroup.com/jandy-home-webui/pool:<git-sha>`. Run one
 replica only, because the pod serializes commands to the Jandy. The credentials Secret
-is never in git (this repo is public), so create it by hand in each namespace.
+is never in git (this repo is public), so create it by hand in each namespace. Don't
+build it with `--from-env-file` from a file that quotes its values: kubectl keeps the
+quotes, and iAqualink then rejects the password.
 
 Build and push:
 
