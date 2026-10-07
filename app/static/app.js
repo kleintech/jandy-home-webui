@@ -32,19 +32,24 @@
     busyText: $('busy-text'),
     lightBlock: $('light-block'),
     light: $('t-light'),
-    colorsWrap: $('colors-wrap'),
+    colorBtn: $('light-color'),
+    colorSwatch: $('light-swatch'),
+    sheet: $('color-sheet'),
+    sheetClose: $('color-close'),
     chips: $('chips'),
     spaPanel: $('spa-panel'),
     poolPanel: $('pool-panel'),
-    spaCur: $('spa-cur'),
+    waterCur: $('water-cur'),
+    airCur: $('air-cur'),
+    spaCol: $('spa-col'),
     spaSet: $('spa-set'),
     spaSlider: $('spa-slider'),
     spaWrap: $('spa-slider-wrap'),
     spaMin: $('spa-min'),
     spaMax: $('spa-max'),
     bubbles: $('t-bubbles'),
-    poolCur: $('pool-cur'),
     setpoints: $('setpoints'),
+    heatCol: $('heat-col'),
     chillCol: $('chill-col'),
     chillNum: $('chill-num'),
     chillSlider: $('chill-slider'),
@@ -255,22 +260,21 @@
   el.toast.addEventListener('click', () => { el.toast.hidden = true; });
 
   // ---------- derived limits ----------
+  // Heat is the LOW set point, Chill the HIGH one; chill >= heat + spread.
+  // Ranges come from the server; anything missing falls back to the other side's
+  // limits (or wide defaults) so the sliders stay usable on an older backend.
   function poolLimits() {
     const p = state.pool;
-    const spread = num(p.min_spread) ?? 0;
-    const heatMax = num(p.heat_max) ?? 104;
-    const chillMin = num(p.chill_min) ?? 50;
+    const spread = Math.max(0, num(p.min_spread) ?? 0);
     if (!p.chill_supported) {
-      return { chill: false, spread, heatLo: num(p.heat_min) ?? 40, heatHi: heatMax };
+      const lo = num(p.heat_min) ?? 40;
+      return { chill: false, spread, heatLo: lo, heatHi: Math.max(lo, num(p.heat_max) ?? 104) };
     }
-    return {
-      chill: true,
-      spread,
-      chillLo: chillMin,
-      chillHi: heatMax - spread,
-      heatLo: Math.max(chillMin + spread, num(p.heat_min) ?? -Infinity),
-      heatHi: heatMax,
-    };
+    const heatLo = num(p.heat_min) ?? (num(p.chill_min) !== null ? num(p.chill_min) - spread : 50);
+    const chillHi = num(p.chill_max) ?? (num(p.heat_max) !== null ? num(p.heat_max) + spread : 104);
+    const heatHi = Math.max(heatLo, num(p.heat_max) ?? chillHi - spread);
+    const chillLo = Math.min(chillHi, num(p.chill_min) ?? heatLo + spread);
+    return { chill: true, spread, heatLo, heatHi, chillLo, chillHi };
   }
 
   // ---------- events ----------
@@ -300,10 +304,31 @@
     toggle('wf', 'pool.water_features');
   });
 
+  // ---------- color sheet ----------
+  function openSheet() {
+    if (!controlsEnabled() || el.sheet.open) return;
+    if (typeof el.sheet.showModal === 'function') el.sheet.showModal();
+    else el.sheet.setAttribute('open', '');   // very old browsers: shown inline
+    const sel = el.chips.querySelector('.chip[aria-pressed="true"]') || el.chips.querySelector('.chip');
+    if (sel) sel.focus();
+  }
+  function closeSheet() {
+    if (!el.sheet.open) return;
+    if (typeof el.sheet.close === 'function') el.sheet.close();
+    else el.sheet.removeAttribute('open');
+  }
+  el.colorBtn.addEventListener('click', openSheet);
+  el.sheetClose.addEventListener('click', closeSheet);
+  // A tap on the backdrop lands on the <dialog> itself (the content fills it
+  // edge to edge), so anything whose target is the dialog is "outside".
+  el.sheet.addEventListener('click', (e) => { if (e.target === el.sheet) closeSheet(); });
+  el.sheet.addEventListener('close', () => { if (document.activeElement === document.body) el.colorBtn.focus(); });
+
   el.chips.addEventListener('click', (e) => {
     const chip = e.target.closest('.chip');
     if (!chip || !controlsEnabled()) return;
     const color = chip.dataset.color;
+    closeSheet();
     if (color === view('light.color') && view('light.on')) return;
     overrides['light.color'] = color;
     overrides['light.on'] = true;   // picking a color turns the light on server-side
@@ -340,13 +365,14 @@
 
   bindSlider(el.spaSlider, 'spaSet', (v) => { overrides['spa.set_temp'] = v; });
 
+  // Heat (low) pushes Chill (high) up; Chill pushes Heat down.
   bindSlider(el.heatSlider, 'poolSet', (v) => {
     const L = poolLimits();
     const heat = clamp(v, L.heatLo, L.heatHi);
     overrides['pool.heat_set'] = heat;
     if (L.chill) {
       let chill = num(view('pool.chill_set'));
-      if (chill === null || chill > heat - L.spread) chill = heat - L.spread;
+      if (chill === null || chill < heat + L.spread) chill = heat + L.spread;
       overrides['pool.chill_set'] = clamp(chill, L.chillLo, L.chillHi);
     }
   });
@@ -357,7 +383,7 @@
     const chill = clamp(v, L.chillLo, L.chillHi);
     overrides['pool.chill_set'] = chill;
     let heat = num(view('pool.heat_set'));
-    if (heat === null || heat < chill + L.spread) heat = chill + L.spread;
+    if (heat === null || heat > chill - L.spread) heat = chill - L.spread;
     overrides['pool.heat_set'] = clamp(heat, L.heatLo, L.heatHi);
   });
 
@@ -466,7 +492,7 @@
       el.conn.setAttribute('aria-label', reachable ? 'Connecting' : 'Offline');
       el.conn.title = el.conn.getAttribute('aria-label');
       el.banner.hidden = reachable;
-      for (const b of [el.modePool, el.modeSpa, el.light, el.bubbles, el.spill, el.wf]) b.disabled = true;
+      for (const b of [el.modePool, el.modeSpa, el.light, el.colorBtn, el.bubbles, el.spill, el.wf]) b.disabled = true;
       for (const s of [el.spaSlider, el.chillSlider, el.heatSlider]) s.disabled = true;
       return;
     }
@@ -501,21 +527,31 @@
     el.lightBlock.hidden = light.available === false;
     renderToggle(el.light, view('light.on'), { enabled: connected, pending: isPending('light') });
     const colors = Array.isArray(light.colors) ? light.colors : [];
-    el.colorsWrap.hidden = colors.length === 0;
-    if (colors.length) {
-      renderChips(colors, view('light.color') || 'White', connected, isPending('color'));
-    }
+    const color = view('light.color') || 'White';
+    const colorPending = isPending('color');
+    el.colorBtn.hidden = colors.length === 0;
+    el.colorBtn.disabled = !connected;
+    el.colorBtn.classList.toggle('pending', colorPending);
+    el.colorSwatch.style.setProperty('--sw', swatchFor(color));
+    el.colorBtn.setAttribute('aria-label', `Light color: ${color}, change`);
+    el.colorBtn.title = color;
+    if (colors.length) renderChips(colors, color, connected, colorPending);
+    if (el.sheet.open && (colors.length === 0 || light.available === false || !connected)) closeSheet();
 
-    // panels
-    el.spaPanel.hidden = mode !== 'spa';
-    el.poolPanel.hidden = mode !== 'pool';
+    // panels: shared temperature layout, mode-specific set points and toggles
+    const spaMode = mode === 'spa';
+    el.spaPanel.hidden = !spaMode;
+    el.poolPanel.hidden = spaMode;
+    const spa = state.spa || {};
+    const pool = state.pool || null;
+    setTemp(el.waterCur, spaMode ? spa.current_temp : pool && pool.current_temp);
+    setTemp(el.airCur, state.air_temp);
 
     // spa
-    const spa = state.spa || {};
-    setTemp(el.spaCur, spa.current_temp);
+    el.spaCol.hidden = !spaMode;
     setTemp(el.spaSet, view('spa.set_temp'));
     const spaLo = num(spa.set_min) ?? 80;
-    const spaHi = num(spa.set_max) ?? 104;
+    const spaHi = Math.max(spaLo, num(spa.set_max) ?? 104);
     renderSlider(el.spaSlider, el.spaWrap, spaLo, spaHi, view('spa.set_temp'), {
       enabled: connected, pending: isPending('spaSet'), minEl: el.spaMin, maxEl: el.spaMax,
     });
@@ -523,12 +559,13 @@
     renderToggle(el.bubbles, view('spa.bubbles'), { enabled: connected, pending: isPending('bubbles') });
 
     // pool
-    if (state.pool) {
-      const L = poolLimits();
+    const L = pool ? poolLimits() : null;
+    el.heatCol.hidden = spaMode || !pool;
+    el.chillCol.hidden = spaMode || !L || !L.chill;
+    el.setpoints.classList.toggle('single', spaMode || !L || !L.chill);
+    el.spreadNote.hidden = spaMode || !L || !L.chill || !(L.spread > 0);
+    if (pool) {
       const poolPending = isPending('poolSet');
-      setTemp(el.poolCur, state.pool.current_temp);
-      el.chillCol.hidden = !L.chill;
-      el.setpoints.classList.toggle('single', !L.chill);
       setTemp(el.heatNum, view('pool.heat_set'));
       renderSlider(el.heatSlider, el.heatWrap, L.heatLo, L.heatHi, view('pool.heat_set'), {
         enabled: connected, pending: poolPending, minEl: el.heatMin, maxEl: el.heatMax,
@@ -538,10 +575,7 @@
         renderSlider(el.chillSlider, el.chillWrap, L.chillLo, L.chillHi, view('pool.chill_set'), {
           enabled: connected, pending: poolPending, minEl: el.chillMin, maxEl: el.chillMax,
         });
-        el.spreadNote.hidden = !(L.spread > 0);
-        el.spreadNote.textContent = `Heat stays at least ${L.spread}° above Chill.`;
-      } else {
-        el.spreadNote.hidden = true;
+        el.spreadNote.textContent = `Chill stays at least ${L.spread}° above Heat.`;
       }
       el.heatSlider.setAttribute('aria-label', 'Pool heat set temperature');
       el.chillSlider.setAttribute('aria-label', 'Pool chill set temperature');

@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import weather
 from .backends.base import Backend, BackendError
 from .service import Limits, PoolService, RuleError
 
@@ -55,7 +56,7 @@ def limits_from_env() -> Limits:
         spa_max=i("SPA_MAX", d.spa_max),
         pool_heat_min=i("POOL_HEAT_MIN", d.pool_heat_min),
         pool_heat_max=i("POOL_HEAT_MAX", d.pool_heat_max),
-        pool_chill_min=i("POOL_CHILL_MIN", d.pool_chill_min),
+        pool_chill_max=i("POOL_CHILL_MAX", d.pool_chill_max),
         min_spread=i("POOL_MIN_SPREAD", d.min_spread),
     )
 
@@ -129,6 +130,7 @@ def create_app(service: PoolService | None = None) -> FastAPI:
     async def index():
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
+    app.include_router(weather.router)
     app.mount("/static", StaticFiles(directory=STATIC, check_dir=False), name="static")
     return app
 

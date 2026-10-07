@@ -7,8 +7,12 @@ metadata:
     app.kubernetes.io/name: pool
 data:
   JANDY_BACKEND: iaqualink
+  # This panel (verified 2026-10-07): aux_1 "Pool Light" (Jandy WaterColors),
+  # aux_2 "Air Blower" = Bubbles, aux_3 "Spillover", aux_4 "Wtr Feature" = Water
+  # Features (the first virtual aux, "Aux V1", renamed on the panel).
+  JANDY_WATER_FEATURES_DEVICE: aux_4
   POLL_SECONDS: "15"
   SPA_MAX: "103"
-  POOL_HEAT_MAX: "92"
-  POOL_CHILL_MIN: "82"
+  POOL_HEAT_MIN: "82"
+  POOL_CHILL_MAX: "92"
   POOL_MIN_SPREAD: "5"

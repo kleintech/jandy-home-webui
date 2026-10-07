@@ -33,6 +33,7 @@ class Snapshot:
     pool_heater: bool = False
     spa_temp: int | None = None
     pool_temp: int | None = None
+    air_temp: int | None = None
     spa_set: int | None = None
     pool_heat_set: int | None = None
     # None when the controller has no chiller / chill setpoint.

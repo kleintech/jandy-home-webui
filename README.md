@@ -15,7 +15,8 @@ uses), talking to the iAqualink cloud API with your iAqualink account.
 | **Light** | the first light the panel reports (or `JANDY_LIGHT_DEVICE`). Turning it on always starts on white |
 | **Light color** | the light's effect list. The panel's own white effect ("Alpine White" or "Cloud White") is shown as **White** |
 | **Spa Set Temp** | `spa_set_point`, capped at 103 |
-| **Pool Chill / Heat** | `pool_chill_set_point` / `pool_set_point`. Chill ≥ 82, heat ≤ 92, heat ≥ chill + 5 |
+| **Pool Heat / Chill** | `pool_set_point` (heat, the low set point, left slider) / `pool_chill_set_point` (chill, the high one, right slider). Heat ≥ 82, chill ≤ 92, chill ≥ heat + 5 |
+| **Water Temp / Air Temp** | `spa_temp` or `pool_temp` (by mode) / `air_temp` |
 | **Bubbles** | `aux_2` |
 | **Water Features** | the device labelled **Aux V1** |
 | **Spillover** | the device labelled **Spillover** (an aux or a OneTouch scene). The toggle is hidden if there isn't one |
@@ -51,10 +52,10 @@ panel reported.
 | `JANDY_BACKEND` | `iaqualink` | `mock` for an in-memory fake |
 | `POLL_SECONDS` | `15` | how often to poll the cloud (Home Assistant uses 15) |
 | `SPA_MIN` / `SPA_MAX` | `80` / `103` | spa set point range |
-| `POOL_HEAT_MAX` | `92` | |
-| `POOL_CHILL_MIN` | `82` | |
-| `POOL_MIN_SPREAD` | `5` | |
-| `POOL_HEAT_MIN` | `70` | only used when there is no chiller |
+| `POOL_HEAT_MIN` | `82` | lowest pool heat set point |
+| `POOL_CHILL_MAX` | `92` | highest pool chill set point |
+| `POOL_MIN_SPREAD` | `5` | chill stays at least this far above heat |
+| `POOL_HEAT_MAX` | `92` | only matters without a chiller (with one, heat ≤ chill max − spread) |
 | `PORT` | `8080` | (container) |
 | `LOG_LEVEL` | `INFO` | |
 | `MOCK_LATENCY` | `0` | seconds of fake delay per command, mock only |

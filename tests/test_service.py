@@ -82,36 +82,47 @@ class TestSpaSetpoint:
 
 
 class TestPoolSetpoints:
+    # Heat is the low set point, chill the high one: heat >= 82, chill <= 92,
+    # chill >= heat + 5.
     @pytest.mark.parametrize(
         "heat,chill",
-        [(93, 85), (90, 81), (90, 86), (86, 82)],
-        ids=["heat-above-92", "chill-below-82", "spread-4", "spread-4-at-floor"],
+        [(81, 90), (85, 93), (86, 90), (88, 92), (90, 85)],
+        ids=["heat-below-82", "chill-above-92", "spread-4", "spread-4-at-ceiling", "old-orientation"],
     )
     def test_rejects_out_of_rules(self, client, backend, heat, chill):
-        # Bug: server trusting the sliders, letting heat > 92, chill < 82 or a
-        # spread under 5 through.
+        # Bug: server trusting the sliders, letting heat < 82, chill > 92 or a
+        # spread under 5 through -- or still using the old heat-above-chill rule.
         r = client.post("/api/pool/setpoints", json={"heat_set": heat, "chill_set": chill})
         assert r.status_code == 409, r.text
         assert not backend.calls
 
-    def test_accepts_extremes(self, client, backend):
-        # Bug: off-by-one at the exact limits (92 heat, 87 chill = 5 spread).
-        r = client.post("/api/pool/setpoints", json={"heat_set": 92, "chill_set": 87})
-        assert r.status_code == 200
-        assert backend.calls == [("set_pool_setpoints", 92, 87)]
+    @pytest.mark.parametrize("heat,chill", [(82, 87), (87, 92)])
+    def test_accepts_extremes(self, client, backend, heat, chill):
+        # Bug: off-by-one at the exact limits (5 degree spread at floor and ceiling).
+        r = client.post("/api/pool/setpoints", json={"heat_set": heat, "chill_set": chill})
+        assert r.status_code == 200, r.text
+        assert backend.calls == [("set_pool_setpoints", heat, chill)]
+
+    def test_advertised_ranges_match_rules(self, client):
+        # Bug: sliders offered values the server then rejects (ranges not derived
+        # from the same limits as the rules).
+        p = client.get("/api/state").json()["pool"]
+        assert (p["heat_min"], p["heat_max"], p["chill_min"], p["chill_max"]) == (82, 87, 87, 92)
 
     def test_chill_required_when_supported(self, client, backend):
         # Bug: heat-only request silently leaving chill where it violates the spread.
-        r = client.post("/api/pool/setpoints", json={"heat_set": 90})
+        r = client.post("/api/pool/setpoints", json={"heat_set": 85})
         assert r.status_code == 409
 
     def test_heat_only_when_no_chiller(self, client, backend):
-        # Bug: controllers without a chiller unable to set the heat set point at all.
+        # Bug: controllers without a chiller unable to set the heat set point at all,
+        # or the 82 floor not applying to them.
         backend.state.pool_chill_set = None
         client.app.state.svc.snap.pool_chill_set = None
-        r = client.post("/api/pool/setpoints", json={"heat_set": 80})
+        r = client.post("/api/pool/setpoints", json={"heat_set": 90})
         assert r.status_code == 200
         assert r.json()["pool"]["chill_supported"] is False
+        assert client.post("/api/pool/setpoints", json={"heat_set": 81}).status_code == 409
 
 
 class TestSpilloverWaterFeatures:
@@ -153,6 +164,11 @@ class TestLight:
         r = client.post("/api/light/color", json={"color": "Plaid"})
         assert r.status_code == 409
         assert not backend.calls
+
+
+def test_air_temp_reported(client):
+    # Bug: the new Air Temp field missing from state, so the UI always shows "--".
+    assert client.get("/api/state").json()["air_temp"] == 78
 
 
 def test_controller_down_is_reported_not_crashing():

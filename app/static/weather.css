@@ -1,0 +1,138 @@
+/* Weather card. Reuses app.css tokens (--card, --text, --muted, --border, --radius);
+   adds chart colors validated for both surfaces (red/blue pass CVD + 3:1 contrast). */
+
+:root {
+  --wx-temp: #e34948;
+  --wx-rain: #2a78d6;
+  --wx-cloud: #dfe4ea;
+  --wx-grid: #edf0f4;
+  --wx-sun: #f2a516;
+  --wx-cloud-icon: #a9b4c1;
+  --wx-tip-bg: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --wx-temp: #e66767;
+    --wx-rain: #3987e5;
+    --wx-cloud: #2a3542;
+    --wx-grid: #1e2833;
+    --wx-sun: #f5b83d;
+    --wx-cloud-icon: #8796a7;
+    --wx-tip-bg: #1d2731;
+  }
+}
+
+.wx-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.wx-head h2 { margin-bottom: 8px; }
+.wx-where {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wx-now {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.wx-icon { width: 52px; height: 52px; flex: none; }
+.wx-icon svg { width: 100%; height: 100%; display: block; }
+.wx-temp {
+  font-size: 48px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -.02em;
+}
+.wx-temp .unit { font-size: 22px; font-weight: 600; vertical-align: top; margin-left: 1px; color: var(--muted); }
+.wx-cond { min-width: 0; }
+.wx-desc { font-size: 18px; font-weight: 650; }
+.wx-meta {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 10px;
+}
+
+.wx-summary {
+  margin: 12px 0 0;
+  font-size: 15px;
+  line-height: 1.4;
+}
+.wx-stale { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+
+.wx-legend {
+  display: flex;
+  gap: 14px;
+  margin: 12px 0 2px;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--muted);
+}
+.wx-legend li { display: flex; align-items: center; gap: 5px; }
+.wx-key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
+.wx-key.temp { background: var(--wx-temp); }
+.wx-key.rain { background: var(--wx-rain); }
+.wx-key.cloud { height: 10px; width: 12px; border-radius: 2px; background: var(--wx-cloud); }
+
+.wx-chart {
+  position: relative;
+  margin: 0 -4px 4px;
+  touch-action: pan-y;
+  -webkit-user-select: none;
+  user-select: none;
+  outline: none;
+}
+.wx-chart:focus-visible { box-shadow: 0 0 0 2px var(--accent, #0077b6); border-radius: 8px; }
+.wx-chart svg { display: block; width: 100%; overflow: visible; }
+
+.wx-chart .grid { stroke: var(--wx-grid); stroke-width: 1; shape-rendering: crispEdges; }
+.wx-chart .base { stroke: var(--border); stroke-width: 1; shape-rendering: crispEdges; }
+.wx-chart .cloud { fill: var(--wx-cloud); }
+.wx-chart .rain-area { fill: var(--wx-rain); fill-opacity: .12; }
+.wx-chart .rain { fill: none; stroke: var(--wx-rain); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.wx-chart .temp { fill: none; stroke: var(--wx-temp); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.wx-chart .dot-temp { fill: var(--wx-temp); stroke: var(--card); stroke-width: 2; }
+.wx-chart .dot-rain { fill: var(--wx-rain); stroke: var(--card); stroke-width: 2; }
+.wx-chart .lbl { fill: var(--text); font-size: 12px; font-weight: 600; }
+.wx-chart .axis { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.wx-chart .cross { stroke: var(--muted); stroke-width: 1; shape-rendering: crispEdges; }
+
+.wx-tip {
+  position: absolute;
+  top: 0;
+  pointer-events: none;
+  min-width: 112px;
+  padding: 6px 9px;
+  border-radius: 10px;
+  background: var(--wx-tip-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, .14);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.wx-tip .t { color: var(--muted); font-weight: 600; margin-bottom: 1px; }
+.wx-tip .row { display: flex; align-items: center; gap: 6px; }
+.wx-tip .row b { font-weight: 700; min-width: 30px; }
+.wx-tip .row span:last-child { color: var(--muted); }
+
+.wx-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

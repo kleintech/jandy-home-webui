@@ -39,9 +39,9 @@ class FakeCloud(AqualinkClient):
             if "spa_set_point" in x:
                 x["spa_set_point"] = "100"
             if "pool_set_point" in x:
-                x["pool_set_point"] = "88"
+                x["pool_set_point"] = "84"
             if "pool_chill_set_point" in x and chill:
-                x["pool_chill_set_point"] = "83"
+                x["pool_chill_set_point"] = "90"
             if "heatpump_info" in x:
                 x["heatpump_info"].update(isChillAvailable=chill, heatpumptype="2-wired", heatpumpstatus="enabled")
         self.sent: list[tuple[str, dict]] = []
@@ -121,8 +121,9 @@ def test_state_maps_fixture_devices(client):
     assert s["connected"] is True
     assert s["mode"] == "pool"
     assert s["spa"]["current_temp"] == 99 and s["spa"]["set_temp"] == 100
-    assert s["pool"]["current_temp"] == 89 and s["pool"]["heat_set"] == 88
-    assert s["pool"]["chill_set"] == 83 and s["pool"]["chill_supported"] is True
+    assert s["pool"]["current_temp"] == 89 and s["pool"]["heat_set"] == 84
+    assert s["pool"]["chill_set"] == 90 and s["pool"]["chill_supported"] is True
+    assert s["air_temp"] == 93
     # The fixture has no "Spillover" device.
     assert s["pool"]["spillover_available"] is False
 
@@ -167,13 +168,13 @@ def test_water_features_found_by_label_aux_v1(client, cloud):
 def test_chill_write_uses_hpm_command_not_set_temps(client, cloud):
     # Bug (iaqualink 0.7.0, flz/iaqualink-py#274): chill written via set_temps
     # temp2, overwriting the pool HEAT set point.
-    r = client.post("/api/pool/setpoints", json={"heat_set": 90, "chill_set": 84})
+    r = client.post("/api/pool/setpoints", json={"heat_set": 85, "chill_set": 91})
     assert r.status_code == 200, r.text
     sent = [(c, e) for c, e in cloud.sent if not c.startswith("get_")]
-    assert ("setpoint_hpm_temp", {"poolchillsetpointtemp": "84"}) in sent
+    assert ("setpoint_hpm_temp", {"poolchillsetpointtemp": "91"}) in sent
     assert not any(c == "set_temps" for c, _ in sent)
-    assert r.json()["pool"]["heat_set"] == 90
-    assert r.json()["pool"]["chill_set"] == 84
+    assert r.json()["pool"]["heat_set"] == 85
+    assert r.json()["pool"]["chill_set"] == 91
 
 
 def test_spillover_by_onetouch_label(cloud):
@@ -259,7 +260,7 @@ def test_offline_controller_gets_no_commands():
 
 def test_setpoint_rules_use_fresh_state_not_offline_cache():
     # Bug: service last saw the controller offline (no chill known) and let a
-    # heat-only 75 through, breaking the spread against chill 83 on the panel.
+    # heat-only 88 through, breaking the spread against chill 90 on the panel.
     async def go():
         c = FakeCloud()
         s = PoolService(await make_backend(c), poll_seconds=3600)
@@ -268,30 +269,42 @@ def test_setpoint_rules_use_fresh_state_not_offline_cache():
         c._home("status")["status"] = "Online"
         c.sent.clear()
         with pytest.raises(RuleError):
-            await s.set_pool_setpoints(75, None)
+            await s.set_pool_setpoints(88, None)
         assert commands(c) == []
     run(go())
 
 
-def test_failed_chill_write_keeps_spread_when_lowering():
-    # Bug: heat written first; when the chill write then failed, 92/87 -> 87/87.
+@pytest.mark.parametrize(
+    "start,target,failing",
+    [
+        ((87, 92), (82, 87), "poolchillsetpointtemp"),
+        ((87, 92), (82, 87), "poolheatsetpointtemp"),
+        ((82, 87), (87, 92), "poolchillsetpointtemp"),
+        ((82, 87), (87, 92), "poolheatsetpointtemp"),
+    ],
+    ids=["lower-chill-fails", "lower-heat-fails", "raise-chill-fails", "raise-heat-fails"],
+)
+def test_failed_write_keeps_spread(start, target, failing):
+    # Bug: the two writes in the wrong order, so when one fails after the other
+    # succeeded the panel is left with chill < heat + 5 (lowering 87/92 -> 82/87
+    # chill-first with heat failing leaves 87/87).
     async def go():
         c = FakeCloud()
         s = await svc_for(c)
-        await s.set_pool_setpoints(92, 87)
+        await s.set_pool_setpoints(*start)
         orig = c.send_request
 
         async def boom(url, method="get", **kw):
-            if "poolchillsetpointtemp" in (kw.get("params") or {}):
+            if failing in (kw.get("params") or {}):
                 raise AqualinkServiceException("Unexpected response: 500")
             return await orig(url, method, **kw)
 
         c.send_request = boom
         with pytest.raises(BackendError):
-            await s.set_pool_setpoints(87, 82)
+            await s.set_pool_setpoints(*target)
         heat = int(c._home("pool_set_point")["pool_set_point"])
         chill = int(c._home("pool_chill_set_point")["pool_chill_set_point"])
-        assert heat - chill >= 5, (heat, chill)
+        assert chill - heat >= 5, (heat, chill)
     run(go())
 
 

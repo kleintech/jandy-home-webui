@@ -1,7 +1,7 @@
 """Guest-level pool rules on top of a Backend.
 
 Everything a guest can do goes through here, so the limits (spa max 103, pool heat
-max 92, chill min 82, 5 degree spread, spillover vs water features) are enforced on
+min 82, chill max 92, chill >= heat + 5, spillover vs water features) are enforced on
 the server and not just by the sliders.
 """
 
@@ -31,9 +31,11 @@ STALE_RETRY_SECONDS = 2.0
 class Limits:
     spa_min: int = 80
     spa_max: int = 103
-    pool_heat_min: int = 70
+    # Heat is the LOW pool set point (heat below it), chill the HIGH one (cool above it),
+    # and chill must stay at least min_spread above heat.
+    pool_heat_min: int = 82
     pool_heat_max: int = 92
-    pool_chill_min: int = 82
+    pool_chill_max: int = 92
     min_spread: int = 5
 
 
@@ -123,6 +125,7 @@ class PoolService:
             "unit": s.unit,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "mode": "spa" if s.spa_mode else "pool",
+            "air_temp": s.air_temp,
             "light": {
                 "available": s.light_available,
                 "on": s.light_on,
@@ -142,10 +145,13 @@ class PoolService:
                 "current_temp": s.pool_temp,
                 "heat_set": s.pool_heat_set,
                 "chill_set": s.pool_chill_set,
-                "heat_min": lim.pool_chill_min + lim.min_spread if chill_supported else lim.pool_heat_min,
-                "heat_max": lim.pool_heat_max,
-                "chill_min": lim.pool_chill_min,
-                "chill_max": lim.pool_heat_max - lim.min_spread,
+                "heat_min": lim.pool_heat_min,
+                "heat_max": (
+                    min(lim.pool_heat_max, lim.pool_chill_max - lim.min_spread)
+                    if chill_supported else lim.pool_heat_max
+                ),
+                "chill_min": lim.pool_heat_min + lim.min_spread,
+                "chill_max": lim.pool_chill_max,
                 "min_spread": lim.min_spread,
                 "chill_supported": chill_supported,
                 "spillover_available": s.spillover_available,
@@ -244,23 +250,21 @@ class PoolService:
 
     async def set_pool_setpoints(self, heat: int, chill: int | None) -> dict[str, Any]:
         lim = self.limits
-        if heat > lim.pool_heat_max:
-            raise RuleError(f"pool heat set point can't exceed {lim.pool_heat_max}")
+        if not lim.pool_heat_min <= heat <= lim.pool_heat_max:
+            raise RuleError(f"pool heat set point must be between {lim.pool_heat_min} and {lim.pool_heat_max}")
 
         async def action() -> None:
             # Checked against fresh state: whether there is a chiller decides the rules.
             if self.snap.pool_chill_set is None:
                 if chill is not None:
                     raise RuleError("this controller has no chill set point")
-                if heat < lim.pool_heat_min:
-                    raise RuleError(f"pool heat set point must be at least {lim.pool_heat_min}")
             else:
                 if chill is None:
                     raise RuleError("chill_set is required")
-                if chill < lim.pool_chill_min:
-                    raise RuleError(f"pool chill set point must be at least {lim.pool_chill_min}")
-                if heat - chill < lim.min_spread:
-                    raise RuleError(f"heat must be at least {lim.min_spread} degrees above chill")
+                if chill > lim.pool_chill_max:
+                    raise RuleError(f"pool chill set point can't exceed {lim.pool_chill_max}")
+                if chill - heat < lim.min_spread:
+                    raise RuleError(f"chill must be at least {lim.min_spread} degrees above heat")
             await self.backend.set_pool_setpoints(heat, chill)
 
         return await self._run(action)

@@ -271,6 +271,7 @@ class IAqualinkBackend:
             pool_heater=on(self.map.pool_heater),
             spa_temp=temp("spa_temp"),
             pool_temp=temp("pool_temp"),
+            air_temp=temp("air_temp"),
             spa_set=temp("spa_set_point"),
             pool_heat_set=temp("pool_set_point"),
             pool_chill_set=chill if chill_dev is not None else None,
@@ -329,12 +330,13 @@ class IAqualinkBackend:
                 await self._call(lambda: chill_dev.set_value(chill))
                 self._last_chill = chill
 
-        # Order the two writes so the spread holds even if the second one fails:
-        # moving down, lower chill first; moving up, raise heat first.
+        # Heat is the low set point, chill the high one. Order the two writes so the
+        # spread holds even if the second one fails: moving down, lower heat first;
+        # moving up, raise chill first.
         current_heat = heat_dev.current_value
         if current_heat is not None and heat < current_heat:
-            await write_chill()
             await write_heat()
+            await write_chill()
         else:
-            await write_heat()
             await write_chill()
+            await write_heat()
