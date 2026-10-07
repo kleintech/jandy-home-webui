@@ -1,0 +1,14 @@
+# Guest limits and controller wiring. See README.md for every variable.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pool-config
+  labels:
+    app.kubernetes.io/name: pool
+data:
+  JANDY_BACKEND: iaqualink
+  POLL_SECONDS: "15"
+  SPA_MAX: "103"
+  POOL_HEAT_MAX: "92"
+  POOL_CHILL_MIN: "82"
+  POOL_MIN_SPREAD: "5"

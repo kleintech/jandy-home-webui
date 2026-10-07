@@ -1,0 +1,23 @@
+# https://pool.lab.kleincogroup.com - LAN only. Traefik serves the wildcard cert from its
+# default TLSStore, so there is deliberately no secretName (lab-k3s CONVENTIONS.md).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pool
+  labels:
+    app.kubernetes.io/name: pool
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [pool.lab.kleincogroup.com]
+  rules:
+    - host: pool.lab.kleincogroup.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pool
+                port:
+                  number: 80

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f2f4f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1117" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Pool &amp; Spa">
+  <title>Pool &amp; Spa</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body class="loading" data-mode="pool">
+  <header class="topbar">
+    <h1>Pool &amp; Spa</h1>
+    <span id="conn" class="dot" role="img" aria-label="Connecting" title="Connecting"></span>
+  </header>
+
+  <div id="banner" class="banner" role="alert" hidden>Can't reach the pool controller</div>
+
+  <main>
+    <section class="card" aria-labelledby="fn-h">
+      <h2 id="fn-h">Function</h2>
+
+      <div class="segmented" role="group" aria-label="Mode">
+        <button id="mode-pool" class="seg" type="button" aria-pressed="true" data-target="pool">Pool Mode</button>
+        <button id="mode-spa" class="seg" type="button" aria-pressed="false" data-target="spa">Spa Mode</button>
+      </div>
+      <p id="busy" class="status" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="busy-text"></span></p>
+
+      <div id="light-block">
+        <button id="t-light" class="toggle" type="button" aria-pressed="false">
+          <span class="toggle-label">Light</span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+        <div id="colors-wrap" class="colors">
+          <div id="color-h" class="sublabel">Light color</div>
+          <div id="chips" class="chips" role="group" aria-labelledby="color-h"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="opt-h">
+      <h2 id="opt-h">Options</h2>
+
+      <!-- Spa mode options -->
+      <div id="spa-panel" hidden>
+        <div class="temps">
+          <div class="temp">
+            <div class="temp-label">Current Temp</div>
+            <div class="temp-num" id="spa-cur">--</div>
+          </div>
+          <div class="temp temp-right">
+            <label class="temp-label" for="spa-slider">Set Temp</label>
+            <div class="temp-num set" id="spa-set" aria-hidden="true">--</div>
+          </div>
+        </div>
+        <div class="slider" id="spa-slider-wrap">
+          <input type="range" id="spa-slider" class="warm" min="80" max="103" step="1" value="100">
+          <div class="range-ends" aria-hidden="true"><span id="spa-min"></span><span id="spa-max"></span></div>
+        </div>
+        <button id="t-bubbles" class="toggle" type="button" aria-pressed="false">
+          <span class="toggle-label">Bubbles</span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <!-- Pool mode options -->
+      <div id="pool-panel">
+        <div class="temp">
+          <div class="temp-label">Current Temp</div>
+          <div class="temp-num" id="pool-cur">--</div>
+        </div>
+
+        <h3 class="subhead">Set Temp</h3>
+        <div class="setpoints" id="setpoints">
+          <div class="sp" id="chill-col">
+            <label class="temp-label" for="chill-slider">Chill</label>
+            <div class="temp-num set cool" id="chill-num" aria-hidden="true">--</div>
+            <div class="slider" id="chill-wrap">
+              <input type="range" id="chill-slider" class="cool" min="82" max="87" step="1" value="85">
+              <div class="range-ends" aria-hidden="true"><span id="chill-min"></span><span id="chill-max"></span></div>
+            </div>
+          </div>
+          <div class="sp" id="heat-col">
+            <label class="temp-label" for="heat-slider">Heat</label>
+            <div class="temp-num set warm" id="heat-num" aria-hidden="true">--</div>
+            <div class="slider" id="heat-wrap">
+              <input type="range" id="heat-slider" class="warm" min="87" max="92" step="1" value="90">
+              <div class="range-ends" aria-hidden="true"><span id="heat-min"></span><span id="heat-max"></span></div>
+            </div>
+          </div>
+        </div>
+        <p class="note" id="spread-note"></p>
+
+        <button id="t-spill" class="toggle" type="button" aria-pressed="false" aria-describedby="spill-hint">
+          <span class="toggle-label">Spillover</span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+        <p class="hint" id="spill-hint" hidden>Turn off Water Features to use Spillover</p>
+
+        <button id="t-wf" class="toggle" type="button" aria-pressed="false" aria-describedby="wf-hint">
+          <span class="toggle-label">Water Features</span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+        <p class="hint" id="wf-hint" hidden>Turn off Spillover to use Water Features</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

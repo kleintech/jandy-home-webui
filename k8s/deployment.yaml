@@ -1,0 +1,58 @@
+# One replica on purpose: the pod serializes commands to the Jandy and holds the
+# polled state in memory; two pods would race each other's toggle commands.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pool
+  labels:
+    app.kubernetes.io/name: pool
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pool
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pool
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: pool
+          # Tag is set in kustomization.yaml.
+          image: registry.lab.kleincogroup.com/jandy-home-webui/pool
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+          envFrom:
+            - configMapRef:
+                name: pool-config
+            # iAqualink account. Not in git (public repo); create it by hand:
+            #   kubectl -n <ns> create secret generic iaqualink-credentials \
+            #     --from-literal=IAQUALINK_USERNAME=... --from-literal=IAQUALINK_PASSWORD=...
+            - secretRef:
+                name: iaqualink-credentials
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
