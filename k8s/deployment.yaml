@@ -36,8 +36,11 @@ spec:
             # iAqualink account. Not in git (public repo); create it by hand:
             #   kubectl -n <ns> create secret generic iaqualink-credentials \
             #     --from-literal=IAQUALINK_USERNAME=... --from-literal=IAQUALINK_PASSWORD=...
+            # Optional so a dev deploy can run with JANDY_BACKEND=mock and no account;
+            # in iaqualink mode a missing Secret exits with "IAQUALINK_USERNAME is not set".
             - secretRef:
                 name: iaqualink-credentials
+                optional: true
           readinessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 10
