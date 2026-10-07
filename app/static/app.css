@@ -448,7 +448,7 @@ dialog.sheet::backdrop { background: rgba(2, 6, 12, .5); }
 .card > .subhead:first-child { margin-top: 2px; }
 /* Same size as the toggle titles (Light, Bubbles, ...). */
 .subhead.set-head { font-size: 18px; font-weight: 600; }
-.light-note { margin: 2px 2px 0; font-size: 13px; color: var(--muted); }
+.note.light-note { margin: 8px 2px 0; }
 /* Water/Air readings head the Function card, above the mode switcher. */
 .temps + .segmented { margin-top: 14px; }
 /* Set points. Phones: the number(s) sit above a full-width bar (Heat left,

@@ -51,7 +51,7 @@
       <!-- Two side-by-side buttons that split the row with no gap between them:
            "Light" + switch toggles the light; "Color" + circle opens the sheet. -->
       <div id="light-block" class="light-row">
-        <button id="t-light" class="toggle" type="button" aria-pressed="false">
+        <button id="t-light" class="toggle" type="button" aria-pressed="false" aria-describedby="light-note">
           <span class="toggle-label">Light</span>
           <span class="switch" aria-hidden="true"></span>
         </button>
@@ -64,7 +64,7 @@
     </section>
 
     <section class="card" aria-label="Options">
-      <h3 class="subhead set-head">Set Temp</h3>
+      <h2 class="subhead set-head">Set Temp</h2>
       <!-- Spa mode: one set point. Phones: number above the bar; wider: number right of it. -->
       <div class="sp spa-sp" id="spa-col">
         <div class="sp-val sp-spa">
