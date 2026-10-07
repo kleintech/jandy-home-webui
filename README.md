@@ -25,6 +25,14 @@ uses), talking to the iAqualink cloud API with your iAqualink account.
 The limits are enforced by the server, not just the sliders. Spillover and Water
 Features can't both be on: the server refuses to turn one on while the other is on.
 
+### How often it talks to the Jandy
+
+Pages ask the server for state every 5 s while they are visible (hidden tabs stop). The
+server polls the iAqualink cloud at most every `POLL_SECONDS` (15 s), and only while some
+page has asked in the last `IDLE_SECONDS` (60 s); with nobody looking it doesn't poll at
+all, and the first page to open refreshes before it answers. Weather is fetched on demand
+and cached for 10 minutes.
+
 Jandy `set_*` commands are toggles, so the service refreshes state right before every
 command and only sends the ones that change something. It refuses to act (and asks the
 guest to try again) when the controller is offline or sends an incomplete update, and
@@ -51,7 +59,8 @@ panel reported.
 | `IAQUALINK_USERNAME`, `IAQUALINK_PASSWORD` | — | iAqualink account (required unless mock) |
 | `IAQUALINK_SERIAL` | first iaqua system | pick a system if the account has several |
 | `JANDY_BACKEND` | `iaqualink` | `mock` for an in-memory fake |
-| `POLL_SECONDS` | `15` | how often to poll the cloud (Home Assistant uses 15) |
+| `POLL_SECONDS` | `15` | how often to poll the iAqualink cloud while someone has the page open (Home Assistant uses 15) |
+| `IDLE_SECONDS` | `60` | stop polling this long after the last page request |
 | `SPA_MIN` / `SPA_MAX` | `80` / `103` | spa set point range |
 | `POOL_HEAT_MIN` | `82` | lowest pool heat set point |
 | `POOL_CHILL_MAX` | `92` | highest pool chill set point |
@@ -106,20 +115,23 @@ docker push registry.lab.kleincogroup.com/jandy-home-webui/pool:$sha
 sed -i -E "s/^([[:space:]]*newTag:).*/\1 $sha/" k8s/kustomization.yaml
 ```
 
-**Dev** (throwaway; delete the namespace when done):
+**Dev** runs the mock backend, never the live panel, at `https://pool-dev.lab.kleincogroup.com`
+(`deploy/dev/` overlays `k8s/`; no Secret needed):
 
 ```bash
 kubectl create ns dev-jandy-home-webui
-kubectl -n dev-jandy-home-webui create secret generic iaqualink-credentials \
-  --from-literal=IAQUALINK_USERNAME='you@example.com' --from-literal=IAQUALINK_PASSWORD='…'
-kubectl -n dev-jandy-home-webui apply -k k8s/
-# if prod already exists, move the dev Ingress to pool-dev.lab.kleincogroup.com (see the lab-k3s skill)
+kubectl kustomize deploy/dev | sed "s/:dev-image-tag/:$sha/" | kubectl -n dev-jandy-home-webui apply -f -
 ```
 
-**Prod** (`https://pool.lab.kleincogroup.com`, LAN only, Argo CD): create the same Secret
-in namespace `pool`, commit the `newTag` bump to `main`, and add
-`argocd/apps/pool.yaml` to `kleintech/lab-k3s` (copied from its
-`templates/app/argocd-application.yaml`, pointing at this repo's `k8s/`).
+**Prod** (`https://pool.lab.kleincogroup.com` on the LAN, `https://pool.kleincogroup.com` from
+outside behind Cloudflare Access) is Argo CD (`argocd/apps/pool.yaml` in `kleintech/lab-k3s`)
+syncing `k8s/` from `main`, namespace `pool`. To ship: pin the pushed image tag in
+`k8s/kustomization.yaml` (`newTag`) and merge to `main`. The Secret is created by hand once:
+
+```bash
+kubectl -n pool create secret generic iaqualink-credentials \
+  --from-literal=IAQUALINK_USERNAME='you@example.com' --from-literal=IAQUALINK_PASSWORD='…'
+```
 
 CI runs the tests on GitHub-hosted runners. It doesn't use the lab's self-hosted
 runners, because this repo is public.

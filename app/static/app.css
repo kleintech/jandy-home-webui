@@ -270,7 +270,9 @@ body.offline main { opacity: .6; }
    of it, just left of the switch. */
 .light-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  /* column 1 keeps the "Light" label clear of the color pill */
+  grid-template-columns: 60px minmax(0, 1fr);
+  justify-items: end;
   align-items: center;
   margin-top: 12px;
 }
@@ -283,23 +285,67 @@ main > * { min-width: 0; }
   grid-row: 1;
   position: relative;
   z-index: 1;
-  display: grid;
-  place-items: center;
-  /* Square hit box that reaches the switch, so a near-miss on the circle opens
-     the color sheet instead of toggling the light. */
-  width: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  /* Hit box is the full row height and reaches the switch, so a near-miss on
+     the pill opens the color sheet instead of toggling the light. */
+  min-width: 64px;
+  max-width: calc(100% - 56px);   /* grid area minus the switch margin */
   height: 56px;
   margin: 0 56px 0 0;     /* the 56px switch */
-  padding: 0;
+  padding: 0 6px 0 4px;
   border: 0;
   border-radius: 12px;
   background: transparent;
   cursor: pointer;
 }
+/* A labelled pill (swatch + "Color" + current name + chevron) so it reads as a
+   picker, not decoration — a white swatch alone looked like nothing. */
+.color-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 8px 5px 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--seg-bg);
+}
 .color-dot .chip-swatch {
-  width: 34px;
-  height: 34px;
-  box-shadow: 0 0 0 3px var(--card), 0 0 0 5px var(--border);
+  flex: none;
+  width: 30px;
+  height: 30px;
+  box-shadow: none;
+}
+.color-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.1;
+  text-align: left;
+}
+.color-cap {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.color-name {
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.color-pill .chev { flex: none; color: var(--muted); margin-left: -2px; }
+@media (max-width: 359px) {
+  /* 320px phones: give the color name the room (the pill still reads as a button) */
+  .color-pill { gap: 6px; padding-right: 10px; }
+  .color-pill .chev { display: none; }
+  .color-dot .chip-swatch { width: 26px; height: 26px; }
 }
 .color-dot:disabled { cursor: default; opacity: .45; }
 .color-dot.pending .chip-swatch { animation: pulse 1s ease-in-out infinite; }
@@ -429,14 +475,39 @@ dialog.sheet::backdrop { background: rgba(2, 6, 12, .5); }
   font-size: 16px;
   font-weight: 700;
 }
-.setpoints {
+/* Set points. Phones: the number(s) sit above a full-width bar (Heat left,
+   Chill right). Wider screens: the numbers flank the bar in one row (spa: the
+   number sits right of the bar). */
+.sp {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
+  column-gap: 16px;
+  align-items: end;
 }
-.setpoints.single { grid-template-columns: 1fr; }
-.setpoints .temp-num { font-size: 44px; }
-#chill-col { text-align: right; }
+.sp .temp-num { font-size: 44px; }
+.sp-bar { grid-area: bar; min-width: 0; }
+.pool-sp {
+  grid-template-columns: 1fr 1fr;
+  grid-template-areas: "heat chill" "bar bar";
+}
+.pool-sp.single { grid-template-columns: 1fr; grid-template-areas: "heat" "bar"; }
+.sp-heat { grid-area: heat; }
+.sp-chill { grid-area: chill; text-align: right; }
+.spa-sp { grid-template-columns: 1fr; grid-template-areas: "val" "bar"; }
+.sp-spa { grid-area: val; }
+
+@media (min-width: 521px) {
+  .sp { align-items: center; }
+  .sp .temp-num { font-size: 40px; }
+  .sp-val { min-width: 84px; }
+  .pool-sp { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "heat bar chill"; }
+  .pool-sp.single { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "heat bar"; }
+  .spa-sp { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "bar val"; }
+  .sp-spa { text-align: right; }
+  /* Line the track up with the big numbers rather than their small labels:
+     nudge the bar block down and leave room under it for the end labels. */
+  .sp { margin-bottom: 16px; }
+  .sp .sp-bar { position: relative; top: 20px; }
+}
 
 .note {
   margin: 0 2px 10px;
@@ -445,14 +516,14 @@ dialog.sheet::backdrop { background: rgba(2, 6, 12, .5); }
 }
 
 /* ---------- Sliders ---------- */
-.slider { padding: 2px 0 10px; transition: opacity .2s; }
+.slider { --thumb: 32px; padding: 2px 0 10px; transition: opacity .2s; }
 .slider.pending { opacity: .55; }
 .range-ends {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
   color: var(--muted);
-  margin-top: -4px;
+  margin-top: -6px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -463,11 +534,12 @@ input[type="range"] {
   appearance: none;
   display: block;
   width: 100%;
-  height: 48px;
+  height: 52px;
   margin: 0;
   padding: 0;
   background: transparent;
   cursor: pointer;
+  touch-action: pan-y;
 }
 input[type="range"].cool { --fill: var(--cool); }
 input[type="range"].warm { --fill: var(--warm); }
@@ -481,9 +553,10 @@ input[type="range"]::-webkit-slider-runnable-track {
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 32px;
-  height: 32px;
-  margin-top: -11px;
+  box-sizing: border-box;
+  width: var(--thumb);
+  height: var(--thumb);
+  margin-top: calc((10px - var(--thumb)) / 2);
   border-radius: 50%;
   background: #fff;
   border: 3px solid var(--fill);
@@ -500,14 +573,82 @@ input[type="range"]::-moz-range-progress {
   background: var(--fill);
 }
 input[type="range"]::-moz-range-thumb {
-  width: 26px;
-  height: 26px;
+  box-sizing: border-box;
+  width: var(--thumb);
+  height: var(--thumb);
   border-radius: 50%;
   background: #fff;
   border: 3px solid var(--fill);
   box-shadow: 0 1px 4px rgba(0, 0, 0, .25);
 }
 .slider.pending input[type="range"]::-webkit-slider-thumb { animation: pulse 1s ease-in-out infinite; }
+.slider.pending input[type="range"]::-moz-range-thumb { animation: pulse 1s ease-in-out infinite; }
+
+/* Pool: one bar, two thumbs. The bar takes all touch/mouse input (app.js moves
+   the thumb nearest the finger, so the whole 52px-tall bar is the hit target);
+   the overlaid inputs only draw thumbs and handle keyboard / screen readers.
+   Each input covers just its own part of the bar so its thumb sits on the shared
+   scale: --h-span, --c-off, --c-span are 0..1 fractions of the bar's range;
+   --a/--b are where the coloured span starts/ends. */
+.bar {
+  --a: 0;
+  --b: .5;
+  --h-span: 1;
+  --c-off: 0;
+  --c-span: 1;
+  position: relative;
+  height: 52px;
+  touch-action: pan-y;    /* vertical swipes still scroll the page */
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: pointer;
+}
+.bar.disabled { cursor: default; }
+.bar.disabled .bar-track { opacity: .5; }
+.bar-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 21px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--track);
+  pointer-events: none;
+}
+.bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: calc(var(--thumb) / 2 + (100% - var(--thumb)) * (1 - var(--b)));
+  border-radius: 999px;
+  background: var(--warm);
+}
+.bar.dual .bar-fill {
+  left: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--a));
+  border-radius: 0;
+  background: linear-gradient(to right, var(--warm), var(--cool));
+}
+.bar input[type="range"] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  pointer-events: none;
+}
+.bar input[type="range"]::-webkit-slider-runnable-track { background: transparent; }
+.bar input[type="range"]::-moz-range-track { background: transparent; }
+.bar input[type="range"]::-moz-range-progress { background: transparent; }
+.bar input[type="range"]:disabled { opacity: 1; }
+.bar.disabled input[type="range"]::-webkit-slider-thumb { opacity: .6; }
+.bar.disabled input[type="range"]::-moz-range-thumb { opacity: .6; }
+#heat-slider { width: calc(var(--thumb) + (100% - var(--thumb)) * var(--h-span)); }
+#chill-slider {
+  left: calc((100% - var(--thumb)) * var(--c-off));
+  width: calc(var(--thumb) + (100% - var(--thumb)) * var(--c-span));
+}
+.bar.active input[type="range"]::-webkit-slider-thumb { transition: none; }
+.bar input[type="range"]:focus { z-index: 1; }   /* focused thumb draws on top */
 
 /* ---------- Focus ---------- */
 :focus { outline: none; }

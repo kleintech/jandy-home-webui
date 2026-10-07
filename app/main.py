@@ -79,7 +79,8 @@ def create_app(service: PoolService | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         svc = service or PoolService(
-            make_backend(), limits_from_env(), float(os.environ.get("POLL_SECONDS", "15"))
+            make_backend(), limits_from_env(), float(os.environ.get("POLL_SECONDS", "15")),
+            idle_seconds=float(os.environ.get("IDLE_SECONDS", "60")),
         )
         app.state.svc = svc
         await svc.start()
@@ -106,7 +107,7 @@ def create_app(service: PoolService | None = None) -> FastAPI:
 
     @app.get("/api/state")
     async def state():
-        return svc().state()
+        return await svc().viewer_state()
 
     @app.post("/api/mode")
     async def mode(body: Mode):
@@ -139,6 +140,13 @@ def create_app(service: PoolService | None = None) -> FastAPI:
     @app.post("/api/pool/water_features")
     async def water_features(body: OnOff):
         return await call(svc().set_water_features(body.on))
+
+    @app.get("/sw.js")
+    async def service_worker():
+        # Served from the root so its scope covers the whole app (needed to install
+        # it to the home screen). It caches nothing.
+        return FileResponse(STATIC / "sw.js", media_type="text/javascript",
+                            headers={"Cache-Control": "no-cache"})
 
     @app.get("/")
     async def index():

@@ -1,5 +1,7 @@
-# https://pool.lab.kleincogroup.com - LAN only. Traefik serves the wildcard cert from its
-# default TLSStore, so there is deliberately no secretName (lab-k3s CONVENTIONS.md).
+# https://pool.lab.kleincogroup.com (LAN) and https://pool.kleincogroup.com (published through
+# the Cloudflare tunnel behind Cloudflare Access by lab-k3s scripts/expose.sh --gated; on the
+# LAN that name resolves straight to the node, so no login there). Traefik serves the wildcard
+# certs from its default TLSStore, so there is deliberately no secretName.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -9,9 +11,19 @@ metadata:
 spec:
   ingressClassName: traefik
   tls:
-    - hosts: [pool.lab.kleincogroup.com]
+    - hosts: [pool.lab.kleincogroup.com, pool.kleincogroup.com]
   rules:
     - host: pool.lab.kleincogroup.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pool
+                port:
+                  number: 80
+    - host: pool.kleincogroup.com
       http:
         paths:
           - path: /

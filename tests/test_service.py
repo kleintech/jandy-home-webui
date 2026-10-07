@@ -200,3 +200,91 @@ def test_contradictory_limits_refuse_to_start(monkeypatch, env):
         monkeypatch.setenv(k, v)
     with pytest.raises(SystemExit):
         limits_from_env()
+
+
+class TestViewerDrivenPolling:
+    """The iAqualink cloud is only polled while someone has the page open."""
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        import app.service as service
+
+        t = {"now": 1000.0}
+        monkeypatch.setattr(service.time, "monotonic", lambda: t["now"])
+        return t
+
+    def make(self):
+        backend = MockBackend()
+        refreshes = []
+        orig = backend.refresh
+
+        async def counting():
+            refreshes.append(1)
+            return await orig()
+
+        backend.refresh = counting
+        return PoolService(backend, poll_seconds=15, idle_seconds=60), refreshes
+
+    def test_no_polling_while_nobody_is_watching(self, clock):
+        # Bug: polling Jandy's cloud around the clock with no page open.
+        import asyncio
+
+        svc, refreshes = self.make()
+
+        async def go():
+            await svc._refresh()
+            refreshes.clear()
+            clock["now"] += 3600
+            # What one poll-loop tick does:
+            if svc._viewed_recently():
+                await svc._refresh_if_due()
+
+        asyncio.run(go())
+        assert refreshes == []
+
+    def test_first_view_after_idle_gets_fresh_data(self, clock):
+        # Bug: opening the page after an hour shows hour-old temperatures until
+        # the next background poll.
+        import asyncio
+
+        svc, refreshes = self.make()
+
+        async def go():
+            await svc._refresh()
+            refreshes.clear()
+            clock["now"] += 3600
+            await svc.viewer_state()
+
+        asyncio.run(go())
+        assert refreshes == [1]
+
+    def test_page_polls_do_not_hit_the_cloud_faster_than_poll_seconds(self, clock):
+        # Bug: every 5 s page poll (times several phones) becoming a cloud request.
+        import asyncio
+
+        svc, refreshes = self.make()
+
+        async def go():
+            for _ in range(12):  # one minute of 5 s polls from one phone, two phones
+                await svc.viewer_state()
+                await svc.viewer_state()
+                clock["now"] += 5
+
+        asyncio.run(go())
+        assert len(refreshes) == 4  # t=0, 15, 30, 45
+
+    def test_keeps_polling_while_watched(self, clock):
+        # Bug: water temp never updating while a guest keeps the page open.
+        import asyncio
+
+        svc, refreshes = self.make()
+
+        async def go():
+            await svc.viewer_state()
+            refreshes.clear()
+            clock["now"] += 20
+            if svc._viewed_recently():
+                await svc._refresh_if_due()
+
+        asyncio.run(go())
+        assert refreshes == [1]

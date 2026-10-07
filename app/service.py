@@ -25,6 +25,9 @@ DEFAULT_COLOR = "White"
 SETTLE_SECONDS = 20.0
 # One retry when the controller sends an incomplete update just before a command.
 STALE_RETRY_SECONDS = 2.0
+# Only poll the iAqualink cloud while someone has the page open: a viewer polls
+# /api/state every few seconds, so no request for this long means nobody is looking.
+IDLE_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -45,8 +48,12 @@ class RuleError(Exception):
 
 class PoolService:
     def __init__(self, backend: Backend, limits: Limits | None = None, poll_seconds: float = 15,
-                 settle_seconds: float = SETTLE_SECONDS, stale_retry_seconds: float = STALE_RETRY_SECONDS) -> None:
+                 settle_seconds: float = SETTLE_SECONDS, stale_retry_seconds: float = STALE_RETRY_SECONDS,
+                 idle_seconds: float = IDLE_SECONDS) -> None:
         self.backend = backend
+        self.idle_seconds = idle_seconds
+        self._last_viewer = float("-inf")
+        self._last_refresh = float("-inf")
         self.settle_seconds = settle_seconds
         self.stale_retry_seconds = stale_retry_seconds
         self._commanded: dict[str, tuple[bool, float]] = {}
@@ -74,20 +81,40 @@ class PoolService:
             self._poller.cancel()
         await self.backend.close()
 
+    def _viewed_recently(self) -> bool:
+        return time.monotonic() - self._last_viewer <= self.idle_seconds
+
+    def _due(self) -> bool:
+        return time.monotonic() - self._last_refresh >= self.poll_seconds
+
+    async def _refresh_if_due(self) -> None:
+        if self._lock.locked() or not self._due():
+            return  # a command or another refresh is running and will update state
+        try:
+            async with self._lock:
+                if self._due():
+                    await self._refresh()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("refresh failed: %s", exc)
+
     async def _poll_loop(self) -> None:
         while True:
-            await asyncio.sleep(self.poll_seconds)
-            if self._lock.locked():
-                continue  # a command is running and will refresh when it finishes
-            try:
-                async with self._lock:
-                    await self._refresh()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # keep polling whatever happens
-                log.warning("poll failed: %s", exc)
+            await asyncio.sleep(self.poll_seconds / 3)
+            if self._viewed_recently():
+                await self._refresh_if_due()
+
+    async def viewer_state(self) -> dict[str, Any]:
+        """State for a page poll: marks someone as watching, and if the last
+        refresh is older than a poll interval (nobody was watching), refreshes
+        before answering so a freshly opened page shows current data."""
+        self._last_viewer = time.monotonic()
+        await self._refresh_if_due()
+        return self.state()
 
     async def _refresh(self) -> Snapshot:
+        self._last_refresh = time.monotonic()
         try:
             snap = await self.backend.refresh()
         except StaleData:

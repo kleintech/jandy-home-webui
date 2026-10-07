@@ -34,6 +34,7 @@
     light: $('t-light'),
     colorBtn: $('light-color'),
     colorSwatch: $('light-swatch'),
+    colorName: $('light-color-name'),
     sheet: $('color-sheet'),
     sheetClose: $('color-close'),
     chips: $('chips'),
@@ -48,19 +49,16 @@
     spaMin: $('spa-min'),
     spaMax: $('spa-max'),
     bubbles: $('t-bubbles'),
-    setpoints: $('setpoints'),
-    heatCol: $('heat-col'),
+    poolSp: $('pool-sp'),
+    poolWrap: $('pool-wrap'),
+    poolBar: $('pool-bar'),
+    poolMin: $('pool-min'),
+    poolMax: $('pool-max'),
     chillCol: $('chill-col'),
     chillNum: $('chill-num'),
     chillSlider: $('chill-slider'),
-    chillWrap: $('chill-wrap'),
-    chillMin: $('chill-min'),
-    chillMax: $('chill-max'),
     heatNum: $('heat-num'),
     heatSlider: $('heat-slider'),
-    heatWrap: $('heat-wrap'),
-    heatMin: $('heat-min'),
-    heatMax: $('heat-max'),
     spreadNote: $('spread-note'),
     spill: $('t-spill'),
     spillHint: $('spill-hint'),
@@ -335,7 +333,7 @@
     request('color', 0);
   });
 
-  function bindSlider(input, name, onInput) {
+  function bindSlider(input, name, onInput, gestureActive) {
     input.addEventListener('input', () => {
       if (!controlsEnabled()) return;
       dragging.add(name);
@@ -347,6 +345,7 @@
     // Browsers skip `change` when the thumb is released where it started (or the
     // input was disabled mid-drag), so end the drag on every way a gesture can end.
     const end = () => {
+      if (gestureActive && gestureActive()) return;   // the pool bar's pointer drag ends it
       if (!dragging.has(name) || !controlsEnabled()) return;
       dragging.delete(name);
       onInput(Number(input.value));
@@ -365,27 +364,148 @@
 
   bindSlider(el.spaSlider, 'spaSet', (v) => { overrides['spa.set_temp'] = v; });
 
-  // Heat (low) pushes Chill (high) up; Chill pushes Heat down.
-  bindSlider(el.heatSlider, 'poolSet', (v) => {
+  // ---------- pool set points: one bar, two thumbs ----------
+  // Heat (low) pushes Chill (high) up; Chill pushes Heat down. A pushed thumb is
+  // clamped to its own limits; if it can't make room, the dragged one stops too.
+  function setHeat(v) {
     const L = poolLimits();
-    const heat = clamp(v, L.heatLo, L.heatHi);
-    overrides['pool.heat_set'] = heat;
+    let heat = clamp(v, L.heatLo, L.heatHi);
     if (L.chill) {
       let chill = num(view('pool.chill_set'));
       if (chill === null || chill < heat + L.spread) chill = heat + L.spread;
-      overrides['pool.chill_set'] = clamp(chill, L.chillLo, L.chillHi);
+      chill = clamp(chill, L.chillLo, L.chillHi);
+      if (heat > chill - L.spread) heat = Math.max(L.heatLo, chill - L.spread);
+      overrides['pool.chill_set'] = chill;
     }
-  });
-
-  bindSlider(el.chillSlider, 'poolSet', (v) => {
+    overrides['pool.heat_set'] = heat;
+  }
+  function setChill(v) {
     const L = poolLimits();
     if (!L.chill) return;
-    const chill = clamp(v, L.chillLo, L.chillHi);
-    overrides['pool.chill_set'] = chill;
+    let chill = clamp(v, L.chillLo, L.chillHi);
     let heat = num(view('pool.heat_set'));
     if (heat === null || heat > chill - L.spread) heat = chill - L.spread;
-    overrides['pool.heat_set'] = clamp(heat, L.heatLo, L.heatHi);
+    heat = clamp(heat, L.heatLo, L.heatHi);
+    if (chill < heat + L.spread) chill = Math.min(L.chillHi, heat + L.spread);
+    overrides['pool.heat_set'] = heat;
+    overrides['pool.chill_set'] = chill;
+  }
+
+  // The two range inputs are drawn overlaid on one track but take no pointer
+  // input (CSS pointer-events:none): keyboard and screen readers drive them
+  // natively, while touch/mouse go through the bar, which always moves the thumb
+  // nearest the finger. Overlaid native ranges otherwise hand the touch to
+  // whichever input is on top, which grabs the wrong thumb when they're close.
+  let gesture = null;   // { id, which: 'heat'|'chill'|null, startX, offset, snap }
+  const gestureActive = () => gesture !== null;
+
+  bindSlider(el.heatSlider, 'poolSet', setHeat, gestureActive);
+  bindSlider(el.chillSlider, 'poolSet', setChill, gestureActive);
+
+  function barGeom() {
+    const L = poolLimits();
+    const r = el.poolBar.getBoundingClientRect();
+    const t = parseFloat(getComputedStyle(el.poolBar).getPropertyValue('--thumb')) || 32;
+    const lo = L.heatLo;
+    const hi = L.chill ? Math.max(lo, L.chillHi) : L.heatHi;
+    const usable = Math.max(1, r.width - t);
+    return {
+      L,
+      x: (v) => r.left + t / 2 + (hi > lo ? (v - lo) / (hi - lo) : 0) * usable,
+      v: (x) => lo + Math.round(clamp((x - r.left - t / 2) / usable, 0, 1) * (hi - lo)),
+      // This close to a thumb's centre = grab it (no jump). Kept under one
+      // degree's width on a 320px phone (~22px) so a tap 1° away still jumps.
+      grab: t / 2 + 4,
+    };
+  }
+  const shownSet = (L, which) => {
+    if (which === 'heat') {
+      const v = num(view('pool.heat_set'));
+      return clamp(v === null ? L.heatLo : v, L.heatLo, L.heatHi);
+    }
+    const v = num(view('pool.chill_set'));
+    return clamp(v === null ? L.chillLo : v, L.chillLo, L.chillHi);
+  };
+
+  function moveThumb(which, x) {
+    const v = barGeom().v(x - gesture.offset);
+    if (which === 'heat') setHeat(v); else setChill(v);
+    render();
+  }
+
+  function finishGesture(cancelled) {
+    const g = gesture;
+    gesture = null;
+    try { el.poolBar.releasePointerCapture(g.id); } catch (_) { /* already released */ }
+    el.poolBar.classList.remove('active');
+    if (!dragging.has('poolSet') || !controlsEnabled()) { render(); return; }
+    if (cancelled) {
+      // The browser took the touch for scrolling (or the system did): undo what
+      // this touch changed rather than send a set point nobody chose.
+      for (const [k, o] of Object.entries(g.snap)) {
+        if (o.has) overrides[k] = o.val; else delete overrides[k];
+      }
+    }
+    dragging.delete('poolSet');
+    const grp = groups.poolSet;
+    if (grp.keys.every((k) => !(k in overrides) || overrides[k] === getPath(state, k))) {
+      clearOverrides('poolSet');   // back where the server is: nothing to send
+      render();
+    } else {
+      request('poolSet', SLIDER_DEBOUNCE_MS);
+    }
+  }
+
+  el.poolBar.addEventListener('pointerdown', (e) => {
+    if (gesture || !controlsEnabled() || !state || !state.pool) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (e.pointerType === 'mouse') e.preventDefault();   // no text selection
+    const G = barGeom();
+    const L = G.L;
+    const xh = G.x(shownSet(L, 'heat'));
+    const xc = L.chill ? G.x(shownSet(L, 'chill')) : Infinity;
+    const x = e.clientX;
+    let which;
+    if (!L.chill) which = 'heat';
+    else if (Math.abs(xc - xh) < 1) {
+      // Thumbs on top of each other: the side of the finger decides, or else the
+      // direction of the first move.
+      which = x < xh - 1 ? 'heat' : x > xc + 1 ? 'chill' : null;
+    } else which = Math.abs(x - xh) <= Math.abs(x - xc) ? 'heat' : 'chill';
+    const tx = which === 'chill' ? xc : xh;
+    const near = Math.abs(x - tx) <= G.grab;
+    const snap = {};
+    for (const k of groups.poolSet.keys) snap[k] = { has: k in overrides, val: overrides[k] };
+    // Grabbing a thumb keeps it under the finger (no jump); a tap on the track
+    // jumps the nearest thumb there, like a native slider.
+    gesture = { id: e.pointerId, which, startX: x, offset: near ? x - tx : 0, snap };
+    try { el.poolBar.setPointerCapture(e.pointerId); } catch (_) { /* window listeners cover it */ }
+    el.poolBar.classList.add('active');
+    dragging.add('poolSet');
+    clearTimeout(groups.poolSet.timer);   // don't fire a queued send mid-drag
+    groups.poolSet.timer = null;
+    if (which && !near) moveThumb(which, x);
+    else render();
   });
+
+  el.poolBar.addEventListener('pointermove', (e) => {
+    if (!gesture || e.pointerId !== gesture.id) return;
+    if (!dragging.has('poolSet')) { finishGesture(false); return; }   // dropped by render()
+    if (!gesture.which) {
+      const dx = e.clientX - gesture.startX;
+      if (Math.abs(dx) < 3) return;
+      gesture.which = dx > 0 ? 'chill' : 'heat';
+    }
+    moveThumb(gesture.which, e.clientX);
+  });
+
+  const onUp = (e) => { if (gesture && e.pointerId === gesture.id) finishGesture(false); };
+  const onCancel = (e) => { if (gesture && e.pointerId === gesture.id) finishGesture(true); };
+  el.poolBar.addEventListener('pointerup', onUp);
+  el.poolBar.addEventListener('pointercancel', onCancel);
+  el.poolBar.addEventListener('lostpointercapture', onUp);
+  window.addEventListener('pointerup', onUp, true);
+  window.addEventListener('pointercancel', onCancel, true);
 
   // ---------- rendering ----------
   // Exact names first (Jandy WaterColors / Colors, Pentair, Hayward), then substrings.
@@ -480,6 +600,51 @@
     if (maxEl) maxEl.textContent = hi + '°';
   }
 
+  function setRange(input, lo, hi, value) {
+    input.min = String(lo);
+    input.max = String(hi);
+    const v = num(value);
+    const shown = v === null ? lo : clamp(v, lo, hi);
+    if (Number(input.value) !== shown) input.value = String(shown);
+    input.setAttribute('aria-valuetext', v === null ? 'not set' : `${Math.round(v)} ${unit()}`);
+    return shown;
+  }
+
+  // One bar from heat_min to chill_max (heat_min..heat_max without Chill). Each
+  // input keeps its own min/max (so keyboard and screen readers stop at its real
+  // limits) and is sized/offset to cover just its part of the bar, so its native
+  // thumb lands on the shared scale.
+  function renderPoolBar(L, enabled, pending) {
+    const dual = L.chill;
+    const lo = L.heatLo;
+    const hi = dual ? Math.max(lo, L.chillHi) : L.heatHi;
+    const f = (v) => (hi > lo ? clamp((v - lo) / (hi - lo), 0, 1) : 0);
+    const heatV = view('pool.heat_set');
+    setTemp(el.heatNum, heatV);
+    const h = setRange(el.heatSlider, L.heatLo, L.heatHi, heatV);
+    const bar = el.poolBar.style;
+    bar.setProperty('--h-span', String(f(L.heatHi)));
+    if (dual) {
+      const chillV = view('pool.chill_set');
+      setTemp(el.chillNum, chillV);
+      const c = setRange(el.chillSlider, L.chillLo, L.chillHi, chillV);
+      bar.setProperty('--c-off', String(f(L.chillLo)));
+      bar.setProperty('--c-span', String(f(L.chillHi) - f(L.chillLo)));
+      bar.setProperty('--a', String(f(h)));
+      bar.setProperty('--b', String(f(c)));
+    } else {
+      bar.setProperty('--a', '0');
+      bar.setProperty('--b', String(f(h)));
+    }
+    el.poolBar.classList.toggle('dual', dual);
+    el.poolBar.classList.toggle('disabled', !enabled);
+    el.heatSlider.disabled = el.chillSlider.disabled = !enabled;
+    el.poolWrap.classList.toggle('pending', pending);
+    if (pending) el.poolWrap.setAttribute('aria-busy', 'true'); else el.poolWrap.removeAttribute('aria-busy');
+    el.poolMin.textContent = lo + '°';
+    el.poolMax.textContent = hi + '°';
+  }
+
   function render() {
     // A drag interrupted by the controls being disabled can't finish; drop it so its
     // local values don't mask the server's forever.
@@ -534,7 +699,8 @@
     el.colorBtn.classList.toggle('pending', colorPending);
     el.colorSwatch.style.setProperty('--sw', swatchFor(color));
     el.colorBtn.setAttribute('aria-label', `Light color: ${color}, change`);
-    el.colorBtn.title = color;
+    el.colorBtn.title = 'Change the light color';
+    el.colorName.textContent = color;
     if (colors.length) renderChips(colors, color, connected, colorPending);
     if (el.sheet.open && (colors.length === 0 || light.available === false || !connected)) closeSheet();
 
@@ -560,25 +726,15 @@
 
     // pool
     const L = pool ? poolLimits() : null;
-    el.heatCol.hidden = spaMode || !pool;
-    el.chillCol.hidden = spaMode || !L || !L.chill;
-    el.setpoints.classList.toggle('single', spaMode || !L || !L.chill);
-    el.spreadNote.hidden = spaMode || !L || !L.chill || !(L.spread > 0);
+    const dual = !!(L && L.chill);
+    el.poolSp.hidden = spaMode || !pool;
+    el.poolSp.classList.toggle('single', !dual);
+    el.chillCol.hidden = !dual;
+    el.chillSlider.hidden = !dual;
+    el.spreadNote.hidden = spaMode || !dual || !(L.spread > 0);
     if (pool) {
-      const poolPending = isPending('poolSet');
-      setTemp(el.heatNum, view('pool.heat_set'));
-      renderSlider(el.heatSlider, el.heatWrap, L.heatLo, L.heatHi, view('pool.heat_set'), {
-        enabled: connected, pending: poolPending, minEl: el.heatMin, maxEl: el.heatMax,
-      });
-      if (L.chill) {
-        setTemp(el.chillNum, view('pool.chill_set'));
-        renderSlider(el.chillSlider, el.chillWrap, L.chillLo, L.chillHi, view('pool.chill_set'), {
-          enabled: connected, pending: poolPending, minEl: el.chillMin, maxEl: el.chillMax,
-        });
-        el.spreadNote.textContent = `Chill stays at least ${L.spread}° above Heat.`;
-      }
-      el.heatSlider.setAttribute('aria-label', 'Pool heat set temperature');
-      el.chillSlider.setAttribute('aria-label', 'Pool chill set temperature');
+      renderPoolBar(L, connected, isPending('poolSet'));
+      if (dual) el.spreadNote.textContent = `Chill stays at least ${L.spread}° above Heat.`;
 
       const spill = !!view('pool.spillover');
       const wf = !!view('pool.water_features');

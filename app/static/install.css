@@ -1,0 +1,104 @@
+/* "Add to Home Screen" nudge card (install.js). Reuses the app.css tokens,
+   with fallbacks so it still looks right on its own. */
+
+.pwa-nudge {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(env(safe-area-inset-bottom) + 12px);
+  z-index: 8;                                  /* above the top bar (5), below toasts (10) */
+  width: calc(100% - 24px - env(safe-area-inset-left) - env(safe-area-inset-right));
+  max-width: 520px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 10px 12px;
+  align-items: start;
+  padding: 14px;
+  background: var(--card, #fff);
+  color: var(--text, #0f172a);
+  border: 1px solid var(--border, #e3e8ef);
+  border-radius: var(--radius, 18px);
+  box-shadow: 0 8px 32px rgba(15, 23, 42, .18), 0 1px 3px rgba(15, 23, 42, .08);
+  font-family: var(--font, system-ui, -apple-system, sans-serif);
+  font-size: 15px;
+  line-height: 1.35;
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity .25s ease, transform .25s ease;
+}
+.pwa-nudge.pwa-nudge-in { opacity: 1; transform: none; }
+
+.pwa-nudge-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: block;
+}
+.pwa-nudge-body { min-width: 0; }
+.pwa-nudge-title {
+  margin: 0 0 2px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -.005em;
+  overflow-wrap: anywhere;
+}
+.pwa-nudge-text {
+  margin: 0;
+  color: var(--muted, #5b6878);
+  overflow-wrap: anywhere;
+}
+.pwa-nudge-text strong { color: var(--text, #0f172a); font-weight: 600; }
+.pwa-nudge-share {
+  display: inline-block;
+  vertical-align: -3px;
+  color: var(--cool, #0077b6);
+}
+
+.pwa-nudge-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pwa-nudge-btn {
+  flex: 1 1 auto;
+  min-height: 44px;
+  min-width: 0;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--seg-bg, #e8edf2);
+  color: var(--text, #0f172a);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.pwa-nudge-primary {
+  flex-basis: 100%;
+  background: var(--cool, #0077b6);
+  color: var(--on-accent, #fff);
+}
+.pwa-nudge-btn:focus-visible {
+  outline: 3px solid var(--cool, #0077b6);
+  outline-offset: 2px;
+}
+.pwa-nudge-btn:active { filter: brightness(.95); }
+
+/* Narrow phones (320-359px): keep the two secondary buttons on one row. */
+@media (max-width: 359px) {
+  .pwa-nudge { padding: 12px; gap: 8px 10px; }
+  .pwa-nudge-title { font-size: 15px; }
+  .pwa-nudge-text { font-size: 14px; }
+  .pwa-nudge-btn { padding: 10px 8px; font-size: 14px; }
+  .pwa-nudge-actions { gap: 6px; }
+}
+
+@media (prefers-color-scheme: dark) {
+  .pwa-nudge { box-shadow: 0 8px 32px rgba(0, 0, 0, .5); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pwa-nudge { transition: none; transform: none; }
+}

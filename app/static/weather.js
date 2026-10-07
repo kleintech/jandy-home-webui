@@ -180,92 +180,148 @@
       ". Rain chance up to " + Math.max.apply(null, rain) + "%. Cloud cover averages " + Math.round(avg) + "%.";
   }
 
+  // Temperature scale for the left axis: four equal steps of a round size, so
+  // every °F tick lands on a 0/25/50/75/100% gridline of the right axis and one
+  // set of gridlines serves both. Never narrower than 8° (2° steps), so a
+  // one-degree wobble doesn't look like a swing.
+  function tempScale(tMin, tMax) {
+    var steps = [2, 5, 10, 20, 50], s = 2, lo = 0;
+    for (var k = 0; k < steps.length; k++) {
+      s = steps[k];
+      lo = Math.floor((tMin - 0.5) / s) * s;
+      if (lo + 4 * s >= tMax + 0.5) break;
+    }
+    // Slide down a step at a time while that centers the line better.
+    var mid = (tMin + tMax) / 2;
+    while (lo - s + 4 * s >= tMax + 0.5 && mid - (lo + 2 * s) < -s / 2) lo -= s;
+    return { lo: lo, hi: lo + 4 * s, step: s };
+  }
+
   function drawChart(host, rows) {
     host.textContent = "";
     var W = Math.max(240, Math.round(host.clientWidth || root.clientWidth || 320));
     lastWidth = W;
 
-    var padL = 6, padR = 36;
-    var tTop = 18, tH = 58;               // temperature panel
-    var pTop = tTop + tH + 20, pH = 46;   // rain / cloud panel (0-100%)
-    var axisY = pTop + pH + 16;
-    var H = axisY + 4;
+    // One plot area, two y-axes: °F on the left, 0-100% on the right.
+    var padL = 34, padR = 34;
+    var top = 14, plotH = 136;
+    var base = top + plotH;
+    var axisY = base + 17;
+    var H = axisY + 5;
     var plotW = W - padL - padR;
+    var x0 = padL, x1 = padL + plotW;
 
     var t0 = Date.parse(rows[0].time), t1 = Date.parse(rows[rows.length - 1].time);
     var span = Math.max(1, t1 - t0);
-    var xs = rows.map(function (r) { return padL + (Date.parse(r.time) - t0) / span * plotW; });
+    var xs = rows.map(function (r) { return x0 + (Date.parse(r.time) - t0) / span * plotW; });
 
     var temps = rows.map(function (r) { return r.temp_f; });
     var tMin = Math.min.apply(null, temps), tMax = Math.max.apply(null, temps);
-    var mid = (tMin + tMax) / 2, half = Math.max((tMax - tMin) / 2, 3);  // never exaggerate a 1° wobble
-    var lo = mid - half, hi = mid + half;
-    function ty(v) { return tTop + tH - (v - lo) / (hi - lo) * tH; }
-    function py(v) { return pTop + pH - Math.max(0, Math.min(100, v)) / 100 * pH; }
+    var sc = tempScale(tMin, tMax);
+    function ty(v) { return base - (v - sc.lo) / (sc.hi - sc.lo) * plotH; }
+    function py(v) { return base - Math.max(0, Math.min(100, v)) / 100 * plotH; }
 
     var s = svg("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, role: "img",
                          "aria-label": ariaSummary(rows) });
-    var x0 = padL, x1 = padL + plotW, base = pTop + pH;
 
-    // Gridlines: 0 / 50 / 100% on the lower panel, labeled on the right.
-    [100, 50].forEach(function (v) {
-      s.appendChild(svg("line", { "class": "grid", x1: x0, x2: x1, y1: py(v) + .5, y2: py(v) + .5 }));
-    });
-    [[100, "100%"], [0, "0%"]].forEach(function (p) {
-      s.appendChild(svg("text", { "class": "axis", x: x1 + 6, y: py(p[0]) + 4 }, p[1]));
+
+    // Left axis: temperature in degrees (text color); right axis: % (muted).
+    for (var q = 0; q <= 4; q++) {
+      var v = sc.lo + q * sc.step, y = py(q * 25) + 4;
+      s.appendChild(svg("text", { "class": "axis axis-t", x: x0 - 5, y: y, "text-anchor": "end" },
+        v + "°"));
+    }
+    [0, 50, 100].forEach(function (v) {
+      s.appendChild(svg("text", { "class": "axis axis-p", x: x1 + 5, y: py(v) + 4 }, v + "%"));
     });
 
-    // Cloud cover: grey area behind everything.
+    // Cloud cover: grey area behind everything (% scale).
     var cloudPath = "M" + x0 + " " + base;
     rows.forEach(function (r, i) { cloudPath += "L" + xs[i].toFixed(1) + " " + py(r.cloud_cover).toFixed(1); });
     cloudPath += "L" + x1 + " " + base + "Z";
     s.appendChild(svg("path", { "class": "cloud", d: cloudPath }));
 
-    // Rain chance: blue line over a light wash.
+    // Rain chance: blue line over a light wash (% scale).
     var rainLine = "";
     rows.forEach(function (r, i) { rainLine += (i ? "L" : "M") + xs[i].toFixed(1) + " " + py(r.precip_prob).toFixed(1); });
     s.appendChild(svg("path", { "class": "rain-area", d: rainLine + "L" + x1 + " " + base + "L" + x0 + " " + base + "Z" }));
+    // Gridlines at the quarter marks, shared by both axes (each °F tick sits on
+    // one). Drawn over the areas, translucent, so they read through the clouds.
+    [25, 50, 75, 100].forEach(function (v) {
+      var y = Math.round(py(v)) + .5;
+      s.appendChild(svg("line", { "class": "grid", x1: x0, x2: x1, y1: y, y2: y }));
+    });
     s.appendChild(svg("line", { "class": "base", x1: x0, x2: x1, y1: base + .5, y2: base + .5 }));
     s.appendChild(svg("path", { "class": "rain", d: rainLine }));
 
-    // Temperature: red line.
+    // Temperature: red line on top (°F scale).
     var tempLine = "";
     rows.forEach(function (r, i) { tempLine += (i ? "L" : "M") + xs[i].toFixed(1) + " " + ty(r.temp_f).toFixed(1); });
     s.appendChild(svg("path", { "class": "temp", d: tempLine }));
 
-    // Direct labels, sparingly: start, end, and one interior extreme.
+    // Direct labels, sparingly: start, end, and one interior extreme. Each
+    // sits inside the plot (clear of both axes' labels) on the side of the
+    // point the line isn't heading toward.
     var last = rows.length - 1;
+    var placed = [];   // label boxes, for the rain-peak collision check
+    function put(x, y, anchor, text) {
+      var w = text.length * 7 + 2;
+      var bx = anchor === "start" ? x : anchor === "end" ? x - w : x - w / 2;
+      placed.push({ x: bx, y: y - 11, w: w, h: 13 });
+      s.appendChild(svg("text", { "class": "lbl", x: x, y: y, "text-anchor": anchor }, text));
+    }
+    function side(i, j) {   // "above" unless the neighbour j is higher, or no room
+      var y = ty(temps[i]), yn = ty(temps[j]);
+      var up = !(yn < y - 3);
+      if (up && y - 9 < top + 2) up = false;
+      if (!up && y + 18 > base - 2) up = true;
+      return up ? y - 9 : y + 18;
+    }
     var labels = [{ i: 0, pos: "start" }, { i: last, pos: "end" }];
     var iMax = temps.indexOf(tMax), iMin = temps.indexOf(tMin);
     var ends = [Math.round(temps[0]), Math.round(temps[last])];
     if (Math.round(tMax) > Math.max.apply(null, ends) && iMax > 0 && iMax < last) labels.push({ i: iMax, pos: "above" });
     else if (Math.round(tMin) < Math.min.apply(null, ends) && iMin > 0 && iMin < last) labels.push({ i: iMin, pos: "below" });
     labels.forEach(function (L) {
-      var x = xs[L.i], y = ty(temps[L.i]);
+      var x = xs[L.i], y = ty(temps[L.i]), txt = deg(temps[L.i]);
       if (L.pos === "above" || L.pos === "below") {
-        if (x - xs[0] < 34 || xs[last] - x < 34) return;  // would collide with an end label
+        if (x - xs[0] < 40 || xs[last] - x < 40) return;  // would collide with an end label
       }
       s.appendChild(svg("circle", { "class": "dot-temp", cx: x, cy: y, r: 4 }));
-      var attrs = { "class": "lbl" };
-      if (L.pos === "start") { attrs.x = x; attrs.y = y - 9; attrs["text-anchor"] = "start"; if (attrs.y < 12) attrs.y = y + 18; }
-      else if (L.pos === "end") { attrs.x = x + 7; attrs.y = y + 4; }
-      else if (L.pos === "above") { attrs.x = x; attrs.y = y - 9; attrs["text-anchor"] = "middle"; }
-      else { attrs.x = x; attrs.y = y + 18; attrs["text-anchor"] = "middle"; }
-      s.appendChild(svg("text", attrs, deg(temps[L.i])));
+      if (L.pos === "start") put(x + 2, side(0, Math.min(1, last)), "start", txt);
+      else if (L.pos === "end") put(x - 2, side(last, Math.max(0, last - 1)), "end", txt);
+      else if (L.pos === "above") put(x, y - 9 < top + 2 ? y + 18 : y - 9, "middle", txt);
+      else put(x, y + 18 > base - 2 ? y - 9 : y + 18, "middle", txt);
     });
 
-    // Rain peak label when there's a meaningful chance.
+    // Rain peak label when there's a meaningful chance and room for it.
     var rain = rows.map(function (r) { return r.precip_prob; });
     var rMax = Math.max.apply(null, rain);
     if (rMax >= 10) {
       var ri = rain.indexOf(rMax), rx = xs[ri], ry = py(rMax);
-      s.appendChild(svg("circle", { "class": "dot-rain", cx: rx, cy: ry, r: 4 }));
       var anchor = rx < x0 + 20 ? "start" : (rx > x1 - 20 ? "end" : "middle");
-      s.appendChild(svg("text", { "class": "lbl", x: rx, y: Math.max(ry - 8, pTop - 2), "text-anchor": anchor }, rMax + "%"));
+      var txt = rMax + "%", tw = txt.length * 7 + 2;
+      var ly = ry - 8 < top + 2 ? ry + 17 : ry - 8;
+      var bx = anchor === "start" ? rx : anchor === "end" ? rx - tw : rx - tw / 2;
+      var hit = placed.some(function (b) {
+        return bx < b.x + b.w && bx + tw > b.x && ly - 11 < b.y + b.h && ly + 2 > b.y;
+      });
+      // ...and clear of the temperature line itself.
+      for (var lx = bx - 3; lx <= bx + tw + 3 && !hit; lx += 2) {
+        var j = 1;
+        while (j < last && xs[j] < lx) j++;
+        var f = Math.max(0, Math.min(1, (lx - xs[j - 1]) / ((xs[j] - xs[j - 1]) || 1)));
+        var ly2 = ty(temps[j - 1] + (temps[j] - temps[j - 1]) * f);
+        hit = ly2 > ly - 16 && ly2 < ly + 7;
+      }
+      if (!hit) {
+        s.appendChild(svg("circle", { "class": "dot-rain", cx: rx, cy: ry, r: 4 }));
+        s.appendChild(svg("text", { "class": "lbl lbl-rain", x: rx, y: ly, "text-anchor": anchor }, txt));
+      }
     }
 
     // Hour labels along the bottom.
-    var everyH = plotW / 6 >= 50 ? 1 : 2;
+    var everyH = plotW / 6 >= 46 ? 1 : 2;
     rows.forEach(function (r, i) {
       var m = /T(\d{2}):00/.exec(r.time);
       if (!m) return;
@@ -277,7 +333,7 @@
 
     // Crosshair layer.
     var cross = svg("g", { visibility: "hidden" });
-    var vline = svg("line", { "class": "cross", y1: tTop - 6, y2: base });
+    var vline = svg("line", { "class": "cross", y1: top, y2: base });
     var cdT = svg("circle", { "class": "dot-temp", r: 4 });
     var cdR = svg("circle", { "class": "dot-rain", r: 4 });
     cross.appendChild(vline); cross.appendChild(cdT); cross.appendChild(cdR);

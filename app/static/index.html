@@ -14,6 +14,10 @@
   <link rel="stylesheet" href="/static/weather.css">
   <script src="/static/app.js" defer></script>
   <script src="/static/weather.js" defer></script>
+  <link rel="manifest" href="/static/manifest.json" crossorigin="use-credentials">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/static/install.css">
+  <script src="/static/install.js" defer></script>
 </head>
 <body class="loading" data-mode="pool">
   <header class="topbar">
@@ -41,7 +45,11 @@
           <span class="switch" aria-hidden="true"></span>
         </button>
         <button id="light-color" class="color-dot" type="button" aria-haspopup="dialog" aria-controls="color-sheet" aria-label="Light color: White, change">
-          <span class="chip-swatch" id="light-swatch" aria-hidden="true"></span>
+          <span class="color-pill" aria-hidden="true">
+            <span class="chip-swatch" id="light-swatch"></span>
+            <span class="color-text"><span class="color-cap">Color</span><span class="color-name" id="light-color-name">White</span></span>
+            <svg class="chev" viewBox="0 0 24 24" width="16" height="16"><path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+          </span>
         </button>
       </div>
     </section>
@@ -61,32 +69,35 @@
       </div>
 
       <h3 class="subhead">Set Temp</h3>
-      <div class="setpoints" id="setpoints">
-        <!-- Spa mode: one set point -->
-        <div class="sp" id="spa-col">
+      <!-- Spa mode: one set point. Phones: number above the bar; wider: number right of it. -->
+      <div class="sp spa-sp" id="spa-col">
+        <div class="sp-val sp-spa">
           <label class="temp-label" for="spa-slider">Heat</label>
           <div class="temp-num set warm" id="spa-set" aria-hidden="true">--</div>
-          <div class="slider" id="spa-slider-wrap">
-            <input type="range" id="spa-slider" class="warm" min="80" max="103" step="1" value="100">
-            <div class="range-ends" aria-hidden="true"><span id="spa-min"></span><span id="spa-max"></span></div>
-          </div>
         </div>
-        <!-- Pool mode: Heat (low) and Chill (high) -->
-        <div class="sp" id="heat-col">
+        <div class="slider sp-bar" id="spa-slider-wrap">
+          <input type="range" id="spa-slider" class="warm" min="80" max="103" step="1" value="100">
+          <div class="range-ends" aria-hidden="true"><span id="spa-min"></span><span id="spa-max"></span></div>
+        </div>
+      </div>
+      <!-- Pool mode: Heat (low, left thumb) and Chill (high, right thumb) on one bar.
+           Phones: numbers above the bar; wider: numbers flank it. -->
+      <div class="sp pool-sp" id="pool-sp">
+        <div class="sp-val sp-heat">
           <label class="temp-label" for="heat-slider">Heat</label>
           <div class="temp-num set warm" id="heat-num" aria-hidden="true">--</div>
-          <div class="slider" id="heat-wrap">
-            <input type="range" id="heat-slider" class="warm" min="82" max="87" step="1" value="84">
-            <div class="range-ends" aria-hidden="true"><span id="heat-min"></span><span id="heat-max"></span></div>
-          </div>
         </div>
-        <div class="sp" id="chill-col">
+        <div class="slider sp-bar" id="pool-wrap">
+          <div class="bar" id="pool-bar">
+            <div class="bar-track" aria-hidden="true"><div class="bar-fill" id="pool-fill"></div></div>
+            <input type="range" id="heat-slider" class="warm" min="82" max="87" step="1" value="84" aria-label="Pool heat set point">
+            <input type="range" id="chill-slider" class="cool" min="87" max="92" step="1" value="90" aria-label="Pool chill set point">
+          </div>
+          <div class="range-ends" aria-hidden="true"><span id="pool-min"></span><span id="pool-max"></span></div>
+        </div>
+        <div class="sp-val sp-chill" id="chill-col">
           <label class="temp-label" for="chill-slider">Chill</label>
           <div class="temp-num set cool" id="chill-num" aria-hidden="true">--</div>
-          <div class="slider" id="chill-wrap">
-            <input type="range" id="chill-slider" class="cool" min="87" max="92" step="1" value="90">
-            <div class="range-ends" aria-hidden="true"><span id="chill-min"></span><span id="chill-max"></span></div>
-          </div>
         </div>
       </div>
       <p class="note" id="spread-note" hidden></p>

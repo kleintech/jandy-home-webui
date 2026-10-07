@@ -5,7 +5,7 @@
   --wx-temp: #e34948;
   --wx-rain: #2a78d6;
   --wx-cloud: #dfe4ea;
-  --wx-grid: #edf0f4;
+  --wx-grid: rgba(71, 85, 105, .16);   /* translucent: drawn over the cloud area */
   --wx-sun: #f2a516;
   --wx-cloud-icon: #a9b4c1;
   --wx-tip-bg: #ffffff;
@@ -16,7 +16,7 @@
     --wx-temp: #e66767;
     --wx-rain: #3987e5;
     --wx-cloud: #2a3542;
-    --wx-grid: #2a3644;
+    --wx-grid: rgba(148, 163, 184, .16);
     --wx-sun: #f5b83d;
     --wx-cloud-icon: #8796a7;
     --wx-tip-bg: #1d2731;
@@ -107,6 +107,10 @@
 .wx-chart .dot-rain { fill: var(--wx-rain); stroke: var(--card); stroke-width: 2; }
 .wx-chart .lbl { fill: var(--text); font-size: 12px; font-weight: 600; }
 .wx-chart .axis { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* Two y-axes: left ticks in the temperature color (°F), right ticks muted (%),
+   so each side reads as belonging to its series. */
+.wx-chart .axis-t { fill: var(--text); font-weight: 600; }
+.wx-chart .axis-p { fill: var(--muted); }
 .wx-chart .cross { stroke: var(--muted); stroke-width: 1; shape-rendering: crispEdges; }
 
 .wx-tip {
