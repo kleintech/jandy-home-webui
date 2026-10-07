@@ -86,7 +86,7 @@
 }
 .pwa-nudge-btn:active { filter: brightness(.95); }
 
-/* Narrow phones (320-359px): keep the two secondary buttons on one row. */
+/* Narrow phones (320-359px): the two secondary buttons stack, one per row. */
 @media (max-width: 359px) {
   .pwa-nudge { padding: 12px; gap: 8px 10px; }
   .pwa-nudge-title { font-size: 15px; }

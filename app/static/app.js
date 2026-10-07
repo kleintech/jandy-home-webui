@@ -349,7 +349,9 @@
       dragging.delete(name);
       onInput(Number(input.value));
       const g = groups[name];
-      if (g.keys.every((k) => !(k in overrides) || overrides[k] === getPath(state, k))) {
+      // Only skip the send when nothing is in flight: an in-flight POST will land
+      // its (older) value, so going back to the server's value must still be sent.
+      if (!g.inflight && g.keys.every((k) => !(k in overrides) || overrides[k] === getPath(state, k))) {
         clearOverrides(name);   // back where the server is: nothing to send
         render();
       } else {
@@ -447,8 +449,8 @@
     }
     dragging.delete('poolSet');
     const grp = groups.poolSet;
-    if (grp.keys.every((k) => !(k in overrides) || overrides[k] === getPath(state, k))) {
-      clearOverrides('poolSet');   // back where the server is: nothing to send
+    if (!grp.inflight && grp.keys.every((k) => !(k in overrides) || overrides[k] === getPath(state, k))) {
+      clearOverrides('poolSet');   // back where the server is: nothing to send (and nothing in flight)
       render();
     } else {
       request('poolSet', SLIDER_DEBOUNCE_MS);

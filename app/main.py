@@ -153,6 +153,15 @@ def create_app(service: PoolService | None = None) -> FastAPI:
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     app.include_router(weather.router)
+    @app.middleware("http")
+    async def revalidate_static(request, call_next):
+        # Make browsers revalidate (ETag) every time, so a new index.html is never
+        # paired with an old cached app.js after an update.
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     app.mount("/static", StaticFiles(directory=STATIC, check_dir=False), name="static")
     return app
 
