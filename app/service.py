@@ -61,6 +61,9 @@ class PoolService:
         self.settle_seconds = settle_seconds
         self.stale_retry_seconds = stale_retry_seconds
         self._commanded: dict[str, tuple[bool, float]] = {}
+        # The same, by device key (owner Advanced controls). Guest and owner commands
+        # are recorded in both, so neither can toggle what the other just switched.
+        self._dev_commanded: dict[str, tuple[bool, float]] = {}
         self.limits = limits or Limits()
         self.poll_seconds = poll_seconds
         self.snap = Snapshot()
@@ -142,7 +145,61 @@ class PoolService:
                 del self._commanded[name]  # settled, or the controller caught up
             else:
                 changes[attr] = on
-        return replace(snap, **changes) if changes else snap
+        snap = replace(snap, **changes) if changes else snap
+        return self._overlay_devices(snap)
+
+    def _overlay_devices(self, snap: Snapshot) -> Snapshot:
+        devices = (snap.advanced or {}).get("devices")
+        if not self._dev_commanded or not devices:
+            return snap
+        now = time.monotonic()
+        out = dict(devices)
+        for key, (on, at) in list(self._dev_commanded.items()):
+            cur = devices.get(key)
+            if now - at > self.settle_seconds or (cur is not None and cur.get("on") == on):
+                del self._dev_commanded[key]
+            elif cur is not None:
+                out[key] = {**cur, "on": on}
+        snap.advanced = {**snap.advanced, "devices": out}
+        return snap
+
+    def _switch_keys(self) -> dict[str, str]:
+        try:
+            return dict(self.backend.switch_keys())
+        except Exception as exc:
+            log.warning("switch key lookup failed: %r", exc)
+            return {}
+
+    def _pending_device(self, key: str) -> bool | None:
+        """What we last commanded this device to, while the cloud hasn't caught up."""
+        entry = self._dev_commanded.get(key)
+        if entry and time.monotonic() - entry[1] <= self.settle_seconds:
+            return entry[0]
+        return None
+
+    def _set_device_on(self, key: str, on: bool, now: float) -> None:
+        self._dev_commanded[key] = (on, now)
+        devices = (self.snap.advanced or {}).get("devices")
+        if devices and key in devices:
+            self.snap.advanced = {**self.snap.advanced,
+                                  "devices": {**devices, key: {**devices[key], "on": on}}}
+
+    def _note_device(self, key: str, on: bool) -> None:
+        """Record an owner command on a device, and on any guest switch it drives."""
+        now = time.monotonic()
+        self._set_device_on(key, on, now)
+        for name, k in self._switch_keys().items():
+            if k == key:
+                self._commanded[name] = (on, now)
+                setattr(self.snap, "light_on" if name == "light" else name, on)
+
+    def _note_guest(self, name: str, on: bool) -> None:
+        """Record a guest command, also against the device key it drives."""
+        now = time.monotonic()
+        self._commanded[name] = (on, now)
+        key = self._switch_keys().get(name)
+        if key:
+            self._set_device_on(key, on, now)
 
     # ---- state ---------------------------------------------------------------------
 
@@ -225,7 +282,7 @@ class PoolService:
         current = getattr(self.snap, "light_on" if name == "light" else name)
         if current != on:
             await self.backend.set_switch(name, on)
-            self._commanded[name] = (on, time.monotonic())
+            self._note_guest(name, on)
             setattr(self.snap, "light_on" if name == "light" else name, on)
 
     async def _run(self, action) -> dict[str, Any]:
@@ -288,7 +345,7 @@ class PoolService:
                     return  # double tap; the first one is still taking effect
                 # Turning on always starts at white; picking a color is a separate step.
                 await self.backend.set_light_color(DEFAULT_COLOR)
-                self._commanded["light"] = (True, time.monotonic())
+                self._note_guest("light", True)
             else:
                 await self._ensure("light", on)
 
@@ -303,7 +360,7 @@ class PoolService:
             if color not in self.snap.light_colors:
                 raise RuleError(f"unknown light color {color!r}")
             await self.backend.set_light_color(color)
-            self._commanded["light"] = (True, time.monotonic())
+            self._note_guest("light", True)
 
         return await self._run(action)
 

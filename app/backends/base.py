@@ -52,6 +52,9 @@ class Snapshot:
     pool_covered: bool | None = None
     # Read-only owner view built by app.equipment.build(): {"groups": [...]}.
     equipment: dict = field(default_factory=dict)
+    # Owner "Advanced" model of everything controllable, from the same refresh (see
+    # app/advanced.py for the shape). Empty when the controller isn't reachable.
+    advanced: dict = field(default_factory=dict)
 
 
 class BackendError(Exception):
@@ -77,3 +80,28 @@ class Backend(Protocol):
     async def set_spa_setpoint(self, temp: int) -> None: ...
 
     async def set_pool_setpoints(self, heat: int, chill: int | None) -> None: ...
+
+    # ---- owner "Advanced" controls ---------------------------------------------------
+    # Device keys come from Snapshot.advanced["devices"]; a backend must refuse a key
+    # that isn't in its own current allowlist and must never build a command string
+    # from one.
+
+    def switch_keys(self) -> dict[str, str]:
+        """Guest switch name -> the device key it drives (only those that resolve)."""
+        ...
+
+    async def adv_set_switch(self, key: str, on: bool) -> None: ...
+
+    async def adv_set_heatpump_mode(self, mode: str) -> None: ...
+
+    async def adv_set_light_effect(self, key: str, effect: str) -> None: ...
+
+    async def adv_set_light_brightness(self, key: str, brightness: int) -> None: ...
+
+    async def adv_set_vsp_preset(self, key: str, preset: str) -> None: ...
+
+    async def salt_config(self) -> dict: ...
+
+    async def set_salt(self, pool_pct: int, spa_pct: int) -> dict: ...
+
+    async def salt_boost(self, action: str, hours: int | None, mode: str | None) -> dict: ...

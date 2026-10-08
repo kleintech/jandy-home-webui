@@ -5,12 +5,12 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import weather
+from . import advanced, owner_auth, weather
 from .backends.base import Backend, BackendError
 from .service import Limits, PoolService, RuleError
 
@@ -75,7 +75,9 @@ def limits_from_env() -> Limits:
     return lim
 
 
-def create_app(service: PoolService | None = None) -> FastAPI:
+def create_app(service: PoolService | None = None, owner: owner_auth.OwnerGate | None = None) -> FastAPI:
+    gate = owner or owner_auth.OwnerGate.from_env()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         svc = service or PoolService(
@@ -107,8 +109,9 @@ def create_app(service: PoolService | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/state")
-    async def state():
-        return await svc().viewer_state()
+    async def state(request: Request):
+        # Only whether the owner section exists and is unlocked; no controls here.
+        return {**await svc().viewer_state(), "advanced": gate.status(request)}
 
     @app.post("/api/mode")
     async def mode(body: Mode):
@@ -154,6 +157,9 @@ def create_app(service: PoolService | None = None) -> FastAPI:
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     app.include_router(weather.router)
+    # Owner-only Advanced controls (unlock/lock first: they don't need a session).
+    app.include_router(owner_auth.router(gate))
+    app.include_router(advanced.router(svc, gate.require_owner, call))
     @app.middleware("http")
     async def revalidate_static(request, call_next):
         # Make browsers revalidate (ETag) every time, so a new index.html is never
