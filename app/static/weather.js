@@ -143,6 +143,11 @@
 
   function render() {
     var d = data, c = d.current;
+    // Rebuilding the card would drop keyboard focus; remember what had it.
+    var ae = document.activeElement;
+    var refocus = ae && root.contains(ae)
+      ? (ae.classList.contains("wx-more-sum") ? ".wx-more-sum" : ae.classList.contains("wx-chart") ? ".wx-chart" : null)
+      : null;
     root.textContent = "";
 
     var head = el("div", "wx-head");
@@ -205,12 +210,16 @@
     more.appendChild(chart);
     root.appendChild(more);
     root.appendChild(table(d.hourly));
-    // Draw only while visible (a closed <details> has no width to measure).
-    if (chartOpen) drawChart(chart, d.hourly);
+    // Draw only while open. Setting more.open above fires "toggle" (async), which
+    // does the draw, so there's no synchronous draw here (it would draw twice).
     more.addEventListener("toggle", function () {
       chartOpen = more.open;
       if (chartOpen && data) drawChart(chart, data.hourly);
     });
+    if (refocus) {
+      var target = root.querySelector(refocus);
+      if (target) target.focus({ preventScroll: true });
+    }
   }
 
   // Screen-reader table of the same series (the chart itself is role="img").
@@ -220,7 +229,9 @@
     var wrap = el("div", "wx-sr");
     var tbl = el("table");
     wrap.appendChild(tbl);
-    tbl.appendChild(el("caption", null, "Forecast, next 6 hours"));
+    // The chart (and its aria-label) only exists once opened; the caption carries
+    // the same spoken summary while it is closed.
+    tbl.appendChild(el("caption", null, ariaSummary(rows) || "Forecast, next 6 hours"));
     var hr = el("tr");
     var withHum = hasHumidity(rows);
     var heads = ["Time", "Temp", "Rain chance", "Cloud cover"];
