@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
+from .. import equipment
 from .base import Snapshot, Switch
 
 # Jandy LED WaterColors effects as the iaqualink backend presents them.
@@ -13,6 +14,27 @@ COLORS = [
     "Emerald Rose", "Magenta", "Violet", "Slow Splash", "Fast Splash", "USA!",
     "Fat Tuesday", "Disco Tech",
 ]
+
+# What a real panel's get_home said (flattened), minus anything identifying. The
+# `response` hex ends with the ASCII panel model, like the real one.
+SAMPLE_HOME = {
+    "status": "Online",
+    "response": "AQU='70','00 01 " + " ".join(f"{b:02X}" for b in b"B0316823 RS-4 Combo") + "'",
+    "system_type": "0",
+    "temp_scale": "F",
+    "cover_pool": "1",
+    "freeze_protection": "0",
+    "solar_heater": "",
+    "spa_salinity": "",
+    "pool_salinity": "",
+    "orp": "",
+    "ph": "",
+    "heatpump_info": {"isheatpumpPresent": True, "heatpumpstatus": "enabled", "isChillAvailable": True,
+                      "heatpumpmode": "heat", "heatpumptype": "4-wired"},
+    "swc_info": {"isswcPresent": True, "swcPoolValue": 25, "swcPoolStatus": "running"},
+    "relay_count": "4",
+}
+SAMPLE_FIRMWARE = "4.39"
 
 
 class MockBackend:
@@ -34,6 +56,9 @@ class MockBackend:
             light_colors=list(COLORS),
             light_cycles=True,
         )
+        # Edit to try other panel readings (tests and UI work); the switch rows
+        # below are filled in from the live mock state on each refresh.
+        self.home = {k: (dict(v) if isinstance(v, dict) else v) for k, v in SAMPLE_HOME.items()}
 
     async def _wait(self) -> None:
         if self.latency:
@@ -46,7 +71,25 @@ class MockBackend:
         pass
 
     async def refresh(self) -> Snapshot:
-        return replace(self.state, light_colors=list(self.state.light_colors))
+        s = self.state
+        def bit(on: bool) -> str:
+            return "1" if on else "0"
+        home = {
+            **self.home,
+            "pool_pump": bit(s.filter_pump),
+            "spa_pump": bit(s.spa_mode),
+            "spa_heater": "1" if s.spa_heater else "0",
+            "pool_heater": bit(s.pool_heater),
+        }
+        aux_on = [name for name, on in [("Pool Light", s.light_on), ("Air Blower", s.bubbles),
+                                        ("Wtr Feature", s.water_features)] if on]
+        return replace(
+            s,
+            light_colors=list(s.light_colors),
+            pool_covered=equipment.pool_covered(home),
+            equipment=equipment.build(home, status="Online", firmware=SAMPLE_FIRMWARE,
+                                      aux_on=aux_on, scenes_on=["Spillover"] if s.spillover else []),
+        )
 
     async def set_switch(self, name: Switch, on: bool) -> None:
         self.calls.append(("set_switch", name, on))

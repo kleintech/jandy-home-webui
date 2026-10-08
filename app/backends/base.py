@@ -48,6 +48,10 @@ class Snapshot:
     light_colors: list[str] = field(default_factory=list)
     # Lights that change color by power-cycling (Jandy/Pentair/Hayward on a relay).
     light_cycles: bool = False
+    # Panel's pool cover reading: True covered, False uncovered, None unknown.
+    pool_covered: bool | None = None
+    # Read-only owner view built by app.equipment.build(): {"groups": [...]}.
+    equipment: dict = field(default_factory=dict)
 
 
 class BackendError(Exception):

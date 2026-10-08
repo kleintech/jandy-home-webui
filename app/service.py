@@ -49,8 +49,10 @@ class RuleError(Exception):
 class PoolService:
     def __init__(self, backend: Backend, limits: Limits | None = None, poll_seconds: float = 15,
                  settle_seconds: float = SETTLE_SECONDS, stale_retry_seconds: float = STALE_RETRY_SECONDS,
-                 idle_seconds: float = IDLE_SECONDS) -> None:
+                 idle_seconds: float = IDLE_SECONDS, cover_hint: bool = True) -> None:
         self.backend = backend
+        # Show "the pool cover is closed" under Spillover / Water Features.
+        self.cover_hint = cover_hint
         self.idle_seconds = idle_seconds
         self._last_viewer = float("-inf")
         self._last_refresh = float("-inf")
@@ -187,8 +189,34 @@ class PoolService:
                 "spillover_available": s.spillover_available,
                 "spillover": s.spillover,
                 "water_features": s.water_features,
+                # From the panel's cover_pool (1 = covered, as observed); None = unknown.
+                "covered": s.pool_covered,
+                "cover_hint": self.cover_hint and s.pool_covered is True,
             },
+            "equipment": self._equipment(),
         }
+
+    def _equipment(self) -> dict[str, Any]:
+        """The owner's read-only equipment rows (see app/equipment.py). When the
+        last refresh failed, the rows are the last good ones and the Controller row
+        says so."""
+        groups = [
+            {**g, "rows": [dict(r) for r in g.get("rows", [])]}
+            for g in (self.snap.equipment or {}).get("groups", [])
+        ]
+        if not self.snap.connected:
+            row = {"id": "status", "label": "Controller", "value": "Not reachable", "warn": True}
+            panel = next((g for g in groups if g.get("id") == "panel"), None)
+            if panel is None:
+                groups.append({"id": "panel", "title": "Panel", "note": None, "rows": [row]})
+            else:
+                rows = panel["rows"]
+                current = next((r for r in rows if r.get("id") == "status"), None)
+                if current is None:
+                    rows.insert(0, row)
+                elif current.get("value") == "Online":
+                    current.update(row)
+        return {"groups": groups}
 
     # ---- commands ------------------------------------------------------------------
 
