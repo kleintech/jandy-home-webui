@@ -731,3 +731,9 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px colo
 .eq-row.warn + .eq-row { border-top-color: transparent; }
 .eq-row.warn dt, .eq-row.warn dd { color: var(--warn-text); }
 .eq-note { margin: 4px 2px 0; font-size: 12px; }
+
+/* ---------- Main page sections the owner turned off (Settings → Main page) ---------- */
+body.cfg-no-weather #weather,
+body.cfg-no-wx-chart #weather .wx-more,
+body.cfg-no-swim #weather .wx-swim { display: none !important; }
+.toggles:empty { display: none; }

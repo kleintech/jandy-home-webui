@@ -11,6 +11,17 @@
  *              roll back + toast).
  *   epoch      bumped whenever a POST starts/finishes; a poll that straddled one
  *              is discarded so it can't paint pre-change state over the response.
+ *   config     the app configuration (GET /api/config): which main-page sections
+ *              show, and the guest toggles' conflicts. Refetched whenever
+ *              state.config_version changes.
+ *
+ * Guest toggles are drawn from state.toggles ([{id, label, on, modes, available,
+ * blocked_by}]) and written with POST /api/toggle {id, on}; each toggle gets its
+ * own group ("t:<id>"), keyed on the derived path "tg.<id>".
+ *
+ * window.PoolApp is the small bridge owner.js (Settings / Advanced) uses: read
+ * the latest state and config, subscribe to changes, adopt a config the owner
+ * just saved, and trigger a poll.
  */
 (() => {
   'use strict';
@@ -38,8 +49,12 @@
     sheet: $('color-sheet'),
     sheetClose: $('color-close'),
     chips: $('chips'),
-    spaPanel: $('spa-panel'),
-    poolPanel: $('pool-panel'),
+    functionCard: $('function-card'),
+    optionsCard: $('options-card'),
+    temps: $('temps'),
+    modeSwitch: $('mode-switch'),
+    setpoints: $('setpoints'),
+    toggles: $('toggles'),
     waterCur: $('water-cur'),
     airCur: $('air-cur'),
     spaCol: $('spa-col'),
@@ -48,7 +63,6 @@
     spaWrap: $('spa-slider-wrap'),
     spaMin: $('spa-min'),
     spaMax: $('spa-max'),
-    bubbles: $('t-bubbles'),
     poolSp: $('pool-sp'),
     poolWrap: $('pool-wrap'),
     poolBar: $('pool-bar'),
@@ -60,18 +74,12 @@
     heatNum: $('heat-num'),
     heatSlider: $('heat-slider'),
     spreadNote: $('spread-note'),
-    spill: $('t-spill'),
-    spillHint: $('spill-hint'),
-    wf: $('t-wf'),
-    wfHint: $('wf-hint'),
     coverHint: $('cover-hint'),
     equipFlag: $('equip-flag'),
     equipBody: $('equip-body'),
     settingsBadge: $('settings-badge'),
     menuBadge: $('menu-btn-badge'),
     equipMenuBadge: $('equip-menu-badge'),
-    advRoot: $('adv-root'),
-    viewSettings: $('view-settings'),
     settingsBadgeText: $('settings-badge-text'),
     toast: $('toast'),
   };
@@ -81,6 +89,12 @@
   let fetchFailures = 0;
   let epoch = 0;
   let lastRequestedMode = null;
+  let config = null;          // last GET /api/config (null: not loaded / not available)
+  let configVersion = null;   // version of `config`, or the one being fetched
+  let configLoading = false;
+  let configFailedAt = -Infinity;
+  const CONFIG_RETRY_MS = 30000;
+  const subscribers = [];
   const overrides = Object.create(null);
   const dragging = new Set(); // group names with a slider currently being dragged
 
@@ -138,10 +152,86 @@
   }
 
   function applyState(s) {
+    // Guest POST responses carry no owner status: keep the last one.
+    if (!s.advanced && state && state.advanced) s.advanced = state.advanced;
+    s.toggles = guestToggles(s);
+    s.tg = Object.create(null);
+    for (const t of s.toggles) s.tg[t.id] = !!t.on;
     state = s;
     if (!s.busy && !groups.mode.inflight && !groups.mode.timer) lastRequestedMode = null;
+    maybeLoadConfig();
     render();
+    notify();
   }
+
+  // An older server has no state.toggles: build the same list from its fixed
+  // Bubbles / Spillover / Water Features fields and their own endpoints.
+  function guestToggles(s) {
+    if (Array.isArray(s.toggles)) {
+      return s.toggles.filter((t) => t && typeof t.id === 'string' && /^[a-z0-9_]{1,30}$/.test(t.id))
+        .map((t) => ({ ...t, modes: Array.isArray(t.modes) ? t.modes : ['pool', 'spa'] }));
+    }
+    const out = [];
+    const spa = s.spa || {}, pool = s.pool || null;
+    if ('bubbles' in spa) {
+      out.push({ id: 'bubbles', label: 'Bubbles', on: !!spa.bubbles, modes: ['spa'], available: true,
+        blocked_by: null, conflicts: [], url: '/api/spa/bubbles' });
+    }
+    if (pool) {
+      out.push({ id: 'spillover', label: 'Spillover', on: !!pool.spillover, modes: ['pool'],
+        available: pool.spillover_available !== false, blocked_by: pool.water_features ? 'Water Features' : null,
+        conflicts: ['water_features'], url: '/api/pool/spillover' });
+      out.push({ id: 'water_features', label: 'Water Features', on: !!pool.water_features, modes: ['pool'],
+        available: true, blocked_by: pool.spillover ? 'Spillover' : null,
+        conflicts: ['spillover'], url: '/api/pool/water_features' });
+    }
+    return out;
+  }
+
+  // ---------- app configuration ----------
+  function maybeLoadConfig() {
+    const v = state && state.config_version;
+    if (typeof v !== 'number' || configLoading) return;
+    if (config && config.version === v) return;
+    if (configVersion === v && performance.now() - configFailedAt < CONFIG_RETRY_MS) return;
+    loadConfig(v);
+  }
+
+  async function loadConfig(wanted) {
+    configLoading = true;
+    configVersion = wanted;
+    try {
+      const c = await api('GET', '/api/config', null, GET_TIMEOUT_MS);
+      if (c && typeof c.version === 'number') {
+        config = c;
+        configVersion = c.version;
+      }
+    } catch (_) {
+      configFailedAt = performance.now();
+    } finally {
+      configLoading = false;
+    }
+    render();
+    notify();
+  }
+
+  /** owner.js adopts the document a PUT/reset answered with. */
+  function adoptConfig(c) {
+    if (!c || typeof c.version !== 'number') return;
+    config = c;
+    configVersion = c.version;
+    render();
+    notify();
+  }
+
+  function notify() {
+    for (const fn of subscribers) {
+      try { fn(state, config); } catch (e) { console.error(e); }
+    }
+  }
+
+  // main_page flags; anything missing (or no config at all) shows.
+  const shows = (name) => !(config && config.main_page && config.main_page[name] === false);
 
   // ---------- polling ----------
   let pollTimer = null;
@@ -154,7 +244,10 @@
     polling = true;
     const startEpoch = epoch;
     try {
+      const startedAt = performance.now();
       const s = await api('GET', '/api/state', null, GET_TIMEOUT_MS);
+      // Lets owner.js ignore an owner status fetched before a lock/unlock.
+      Object.defineProperty(s, 'fetchedAt', { value: startedAt, enumerable: false });
       reachable = true;
       fetchFailures = 0;
       if (startEpoch === epoch) applyState(s);  // else a POST raced us; its response wins
@@ -186,7 +279,6 @@
     light:   { label: 'change the light',     keys: ['light.on'],         req: () => ['/api/light', { on: !!view('light.on') }] },
     color:   { label: 'change the light color', keys: ['light.color', 'light.on'], req: () => ['/api/light/color', { color: view('light.color') }] },
     spaSet:  { label: 'set the spa temperature', keys: ['spa.set_temp'],  req: () => ['/api/spa/setpoint', { set_temp: view('spa.set_temp') }] },
-    bubbles: { label: 'change Bubbles',       keys: ['spa.bubbles'],      req: () => ['/api/spa/bubbles', { on: !!view('spa.bubbles') }] },
     poolSet: {
       label: 'set the pool temperature',
       keys: ['pool.heat_set', 'pool.chill_set'],
@@ -196,10 +288,28 @@
         return ['/api/pool/setpoints', body];
       },
     },
-    spill:   { label: 'change Spillover',     keys: ['pool.spillover'],   req: () => ['/api/pool/spillover', { on: !!view('pool.spillover') }] },
-    wf:      { label: 'change Water Features', keys: ['pool.water_features'], req: () => ['/api/pool/water_features', { on: !!view('pool.water_features') }] },
   };
   for (const g of Object.values(groups)) { g.timer = null; g.inflight = false; g.dirty = false; }
+
+  /** The group for one guest toggle (made on first use; the label is refreshed). */
+  function toggleGroup(t) {
+    const name = 't:' + t.id;
+    let g = groups[name];
+    if (!g) {
+      const id = t.id;
+      g = groups[name] = {
+        keys: ['tg.' + id],
+        req: () => {
+          const cur = (state.toggles || []).find((x) => x.id === id);
+          return cur && cur.url ? [cur.url, { on: !!view('tg.' + id) }]
+            : ['/api/toggle', { id, on: !!view('tg.' + id) }];
+        },
+        timer: null, inflight: false, dirty: false,
+      };
+    }
+    g.label = `change ${t.label}`;
+    return name;
+  }
 
   const isPending = (name) => {
     const g = groups[name];
@@ -242,7 +352,8 @@
       if (settled()) clearOverrides(name);   // roll back to server state
       g.inflight = false;
       epoch += 1;
-      toast(`Couldn't ${g.label}: ${e.message}`);
+      // A Hot Tub On/Off step failure already says what happened ("Hot Tub On stopped at step 2 …").
+      toast(/^Hot Tub (On|Off) /.test(e.message) ? e.message : `Couldn't ${g.label}: ${e.message}`);
       render();
       poll();                                 // re-sync with what actually happened
     }
@@ -300,14 +411,13 @@
   }
 
   el.light.addEventListener('click', () => toggle('light', 'light.on'));
-  el.bubbles.addEventListener('click', () => toggle('bubbles', 'spa.bubbles'));
-  el.spill.addEventListener('click', () => {
-    if (view('pool.water_features')) return;
-    toggle('spill', 'pool.spillover');
-  });
-  el.wf.addEventListener('click', () => {
-    if (view('pool.spillover')) return;
-    toggle('wf', 'pool.water_features');
+  el.toggles.addEventListener('click', (e) => {
+    const b = e.target.closest('.toggle[data-id]');
+    if (!b || !state) return;
+    const t = (state.toggles || []).find((x) => x.id === b.dataset.id);
+    if (!t || b.disabled) return;
+    if (!view('tg.' + t.id) && blockedBy(t)) return;   // a conflicting toggle is on
+    toggle(toggleGroup(t), 'tg.' + t.id);
   });
 
   // ---------- color sheet ----------
@@ -736,24 +846,79 @@
     el.equipMenuBadge.textContent = el.equipFlag.textContent;
   }
 
-  // ---------- Settings (app configuration, Settings sheet → ☰ → Settings) ----------
-  // HOOK: the configuration forms (#set-main "Main page", #set-limits
-  // "Temperature limits", #set-hottub "Hot Tub On / Off", #set-toggles "Guest
-  // toggles") render from here, replacing each "Coming soon" placeholder.
-  // Called from render() on every state change. "QR codes & sign" (#qr) is
-  // client-only and lives in settings.js; leave it alone.
-  function renderSettings() {
-    if (!el.viewSettings) return;
+  // ---------- guest toggles ----------
+  // Which other toggles this one can't run with: the config's conflicts (both
+  // directions), else the list an older server implies, else none known.
+  function conflictsOf(t) {
+    const set = new Set(Array.isArray(t.conflicts) ? t.conflicts : []);
+    const list = config && Array.isArray(config.guest_toggles) ? config.guest_toggles : [];
+    for (const c of list) {
+      if (!c || !Array.isArray(c.conflicts)) continue;
+      if (c.id === t.id) c.conflicts.forEach((x) => set.add(x));
+      else if (c.conflicts.includes(t.id)) set.add(c.id);
+    }
+    return set;
   }
 
-  // ---------- Advanced (owner controls, Settings sheet → ☰ → Advanced) ----------
-  // HOOK: owner controls render into el.advRoot (<section id="adv-root">) from
-  // here. Called from render() on every state change, like renderEquipment();
-  // replace the "Owner controls coming soon" placeholder (#adv-placeholder).
-  // Nothing yet: the stub exists so the controls have one place to hook in.
-  function renderAdvanced() {
-    if (!el.advRoot) return;
+  /** Label of a toggle that is (or is being turned) on and conflicts with `t`, else null. */
+  function blockedBy(t) {
+    const conflicts = conflictsOf(t);
+    if (conflicts.size) {
+      for (const o of state.toggles || []) {
+        if (o.id !== t.id && conflicts.has(o.id) && view('tg.' + o.id)) return o.label;
+      }
+      // Our view says nothing conflicting is on; trust the server only while
+      // none of the conflicting toggles has a local change pending.
+      const local = [...conflicts].some((id) => ('tg.' + id) in overrides);
+      return local ? null : (t.blocked_by || null);
+    }
+    return t.blocked_by || null;
   }
+
+  let renderedToggles = '';
+  function renderToggles(mode, connected) {
+    const list = (state.toggles || []).filter((t) => t.available !== false && t.modes.includes(mode));
+    const sig = JSON.stringify(list.map((t) => [t.id, t.label]));
+    if (sig !== renderedToggles) {
+      renderedToggles = sig;
+      el.toggles.textContent = '';
+      for (const t of list) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'toggle';
+        b.dataset.id = t.id;
+        b.id = 'tg-' + t.id;
+        b.setAttribute('aria-pressed', 'false');
+        b.setAttribute('aria-describedby', 'tg-hint-' + t.id);
+        const lab = document.createElement('span');
+        lab.className = 'toggle-label';
+        lab.textContent = String(t.label);
+        const sw = document.createElement('span');
+        sw.className = 'switch';
+        sw.setAttribute('aria-hidden', 'true');
+        b.append(lab, sw);
+        const hint = document.createElement('p');
+        hint.className = 'hint';
+        hint.id = 'tg-hint-' + t.id;
+        hint.hidden = true;
+        el.toggles.append(b, hint);
+      }
+    }
+    for (const t of list) {
+      const b = $('tg-' + t.id);
+      const hint = $('tg-hint-' + t.id);
+      if (!b || !hint) continue;
+      const on = !!view('tg.' + t.id);
+      const blocker = on ? null : blockedBy(t);
+      renderToggle(b, on, { enabled: connected && !blocker, pending: isPending(toggleGroup(t)) });
+      hint.hidden = !blocker;
+      hint.textContent = blocker ? `Turn off ${blocker} first` : '';
+    }
+    return list.length;
+  }
+
+  // ---------- Settings / Advanced ----------
+  // Drawn by owner.js (window.PoolApp.subscribe); nothing to do per render here.
 
   function render() {
     // A drag interrupted by the controls being disabled can't finish; drop it so its
@@ -767,14 +932,12 @@
       el.conn.setAttribute('aria-label', reachable ? 'Connecting' : 'Offline');
       el.conn.title = el.conn.getAttribute('aria-label');
       el.banner.hidden = reachable;
-      for (const b of [el.modePool, el.modeSpa, el.light, el.colorBtn, el.bubbles, el.spill, el.wf]) b.disabled = true;
+      for (const b of [el.modePool, el.modeSpa, el.light, el.colorBtn, ...el.toggles.querySelectorAll('button')]) b.disabled = true;
       for (const s of [el.spaSlider, el.chillSlider, el.heatSlider]) s.disabled = true;
       return;
     }
     el.body.classList.remove('loading');
     renderEquipment();
-    renderSettings();
-    renderAdvanced();
 
     const connected = controlsEnabled();
     const mode = view('mode') === 'spa' ? 'spa' : 'pool';
@@ -792,6 +955,13 @@
     el.body.classList.toggle('offline', !connected);
     el.body.dataset.mode = mode;
 
+    // main page sections the owner turned off (Settings → Main page)
+    el.temps.hidden = !shows('temps');
+    el.modeSwitch.hidden = !shows('mode_switch');
+    el.body.classList.toggle('cfg-no-weather', !shows('weather'));
+    el.body.classList.toggle('cfg-no-wx-chart', !shows('weather_chart'));
+    el.body.classList.toggle('cfg-no-swim', !shows('swim'));
+
     // mode
     el.modePool.setAttribute('aria-pressed', String(mode === 'pool'));
     el.modeSpa.setAttribute('aria-pressed', String(mode === 'spa'));
@@ -803,25 +973,27 @@
 
     // light
     const light = state.light || {};
-    el.lightBlock.hidden = light.available === false;
-    el.lightNote.hidden = light.available === false || !light.cycles;
+    const showLight = shows('light') && light.available !== false;
+    el.lightBlock.hidden = !showLight;
+    el.lightNote.hidden = !showLight || !light.cycles;
     renderToggle(el.light, view('light.on'), { enabled: connected, pending: isPending('light') });
     const colors = Array.isArray(light.colors) ? light.colors : [];
     const color = view('light.color') || 'White';
     const colorPending = isPending('color');
-    el.colorBtn.hidden = colors.length === 0;
+    el.colorBtn.hidden = colors.length === 0 || !shows('light_color');
     el.colorBtn.disabled = !connected;
     el.colorBtn.classList.toggle('pending', colorPending);
     el.colorSwatch.style.setProperty('--sw', swatchFor(color));
     el.colorBtn.setAttribute('aria-label', `Light color: ${color}, change`);
     el.colorBtn.title = 'Change the light color';
     if (colors.length) renderChips(colors, color, connected, colorPending);
-    if (el.sheet.open && (colors.length === 0 || light.available === false || !connected)) closeSheet();
+    if (el.sheet.open && (el.colorBtn.hidden || !showLight || !connected)) closeSheet();
 
     // panels: shared temperature layout, mode-specific set points and toggles
     const spaMode = mode === 'spa';
-    el.spaPanel.hidden = !spaMode;
-    el.poolPanel.hidden = spaMode;
+    el.setpoints.hidden = !shows('setpoints');
+    const nToggles = shows('toggles') ? renderToggles(mode, connected) : 0;
+    el.toggles.hidden = !shows('toggles');
     const spa = state.spa || {};
     const pool = state.pool || null;
     setTemp(el.waterCur, spaMode ? spa.current_temp : pool && pool.current_temp);
@@ -836,7 +1008,6 @@
       enabled: connected, pending: isPending('spaSet'), minEl: el.spaMin, maxEl: el.spaMax,
     });
     el.spaSlider.setAttribute('aria-label', 'Spa set temperature');
-    renderToggle(el.bubbles, view('spa.bubbles'), { enabled: connected, pending: isPending('bubbles') });
 
     // pool
     const L = pool ? poolLimits() : null;
@@ -849,21 +1020,24 @@
     if (pool) {
       renderPoolBar(L, connected, isPending('poolSet'));
       if (dual) el.spreadNote.textContent = `Chill stays at least ${L.spread}° above Heat.`;
-
-      const spill = !!view('pool.spillover');
-      const wf = !!view('pool.water_features');
-      renderToggle(el.spill, spill, { enabled: connected && !wf, pending: isPending('spill') });
-      renderToggle(el.wf, wf, { enabled: connected && !spill, pending: isPending('wf') });
-      // Hidden until the backend finds a Spillover device on the panel.
-      const spillAvail = view('pool.spillover_available') !== false;
-      el.spill.hidden = !spillAvail;
-      el.spillHint.hidden = !wf || !spillAvail;
-      el.wfHint.hidden = !spill;
-      // Informational only: the cover_pool 1/0 mapping isn't confirmed, so the
-      // toggles stay usable and the panel has the final say.
-      el.coverHint.hidden = !(pool.cover_hint === true && pool.covered === true);
     }
+    // Under the pool toggles. Informational only: the cover_pool 1/0 mapping isn't
+    // confirmed, so the toggles stay usable and the panel has the final say.
+    el.coverHint.hidden = spaMode || !pool || nToggles === 0
+      || !(pool.cover_hint === true && pool.covered === true);
+    // A card with nothing left to show goes away.
+    el.optionsCard.hidden = !shows('setpoints') && el.coverHint.hidden && nToggles === 0;
+    el.functionCard.hidden = el.temps.hidden && el.modeSwitch.hidden && el.lightBlock.hidden && el.busy.hidden;
   }
+
+  window.PoolApp = {
+    state: () => state,
+    config: () => config,
+    subscribe(fn) { subscribers.push(fn); if (state) fn(state, config); },
+    adoptConfig,
+    refresh: () => poll(),
+    toast,
+  };
 
   render();
   poll();

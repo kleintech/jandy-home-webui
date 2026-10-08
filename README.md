@@ -6,12 +6,15 @@ the pool and spa without the iAqualink app or your account. They can:
 - switch between **Pool** and **Spa** mode
 - turn the **light** on and pick a color
 - set **temperatures**
-- toggle **Bubbles**, **Spillover** and **Water Features**
+- use the **guest toggles** you set up (by default **Bubbles**, **Spillover** and **Water
+  Features**)
 
 It also shows the water and air temperature, an optional 6-hour **weather** forecast
 with a one-line **"how's the swimming?"** rating, and can be added to a phone's home
-screen like an app. A **Settings** gear (top right) holds the owner's things: printable
-**QR codes** for guests, owner controls (coming) and a read-only **Equipment status**.
+screen like an app. A **Settings** gear (top right) holds the owner's things: the app's
+**Settings** (what guests see, temperature limits, what Hot Tub On / Off does, the guest
+toggles, the weather location) and printable **QR codes**, PIN-protected **Advanced**
+controls for every device on the panel, and a read-only **Equipment status**.
 
 It runs as one small container on your home network and talks to your pool through the
 iAqualink cloud, using [flz/iaqualink-py](https://github.com/flz/iaqualink-py) (the
@@ -19,9 +22,11 @@ library Home Assistant uses). The server enforces house rules such as a 103 °F 
 pool set point ranges, and Spillover never running together with Water Features; they
 aren't just limits on the sliders.
 
-> **There is no built-in login.** Anyone who can open the page can run your pool. Keep it
-> on your home network, or put an authenticating proxy in front of it (see
-> [Remote access](#remote-access)). Never port-forward it to the Internet.
+> **There is no built-in login for guests.** Anyone who can open the page can run your
+> pool. Only the owner parts (changing Settings, and the Advanced controls) need the
+> [owner PIN](#owner-pin). Keep the page on your home network, or put an authenticating
+> proxy in front of it (see [Remote access](#remote-access)). Never port-forward it to
+> the Internet.
 
 ## Contents
 
@@ -122,6 +127,11 @@ light. "Aux V1" had been renamed "Wtr Feature", so Water Features needs
 When a configured device isn't found, the Spillover toggle is hidden and other controls
 return an error. The log then lists every key and label the panel reported.
 
+These variables are the **defaults**. Once the owner saves Settings in the page, the saved
+guest toggles and Hot Tub On / Off steps are used instead (see [Settings](#settings)), and
+the device pickers there list the panel's own devices, so you don't need `discover` for
+that.
+
 ## Configuration reference
 
 All settings are environment variables: in `.env` for Docker, or in a ConfigMap and
@@ -145,10 +155,19 @@ Secret on Kubernetes.
 | `WEATHER_TZ` | `auto` | IANA timezone for forecast times. `auto` uses the location's timezone |
 | `POLL_SECONDS` | `15` | how often to poll iAqualink while someone has the page open |
 | `IDLE_SECONDS` | `60` | stop polling this long after the last page request |
-| `POOL_COVER_HINT` | `1` | `0` hides the "pool cover is closed" hint under Spillover / Water Features |
+| `POOL_COVER_HINT` | `1` | `0` hides the "pool cover is closed" hint under the pool-mode toggles |
+| `OWNER_PIN` | — | **Secret.** 4-12 digits. Turns on the owner features (Advanced controls, changing Settings). Unset: they're off |
+| `OWNER_SECRET` | random at start-up | **Secret.** Signs the owner cookie. Without it, a restart logs the owner out |
+| `OWNER_TRUSTED_PROXIES` | — | comma-separated IPs/CIDRs of your reverse proxy, so PIN rate limiting sees the real client address |
+| `CONFIG_PATH` | `/data/config.json` | where the Settings saved from the page are kept (see [Where settings are saved](#where-settings-are-saved)) |
 | `PORT` | `8080` | listen port inside the container |
 | `LOG_LEVEL` | `INFO` | log verbosity |
 | `MOCK_LATENCY` | `0` | seconds of fake delay per command (mock only) |
+
+`SPA_*`, `POOL_*`, `WEATHER_ZIP`/`LAT`/`LON`/`LABEL`/`COUNTRY` and the `JANDY_*_DEVICE`
+guest-toggle mapping are defaults: once Settings are saved in the page, the saved limits,
+guest toggles and weather location replace them until a **Reset to defaults**.
+`WEATHER_TZ` always comes from the environment.
 
 The service refuses to start if the limits contradict each other, for example when
 `POOL_HEAT_MIN + POOL_MIN_SPREAD > POOL_CHILL_MAX`. If neither `WEATHER_ZIP` nor
@@ -159,13 +178,13 @@ data is fetched.
 
 | Control | On the Jandy |
 |---|---|
-| **Spa Mode** | Turns the filter pump on (only if it's off), then spa mode on, then spa heat on. If the panel's spa set point is above `SPA_MAX`, it's lowered to `SPA_MAX` first. |
-| **Pool Mode** | Turns spa heat off, then spa mode off. The filter pump schedule and the pool heater or heat pump are left alone. |
+| **Hot Tub On** (Spa Mode) | Runs the Hot Tub On steps in order. By default: filter pump on (only if it's off), spa mode on, lower the spa set point to `SPA_MAX` if it's above, spa heat on. A failing step stops the run and the page says which ("Hot Tub On stopped at step 2 of 4 …"). |
+| **Hot Tub Off** (Pool Mode) | Runs the Hot Tub Off steps. By default: spa heat off, then spa mode off; the filter pump schedule and the pool heater or heat pump are left alone. |
 | **Light** | Turning it on always starts on white. Off is off. Relay color lights (Jandy, Pentair, Hayward) pick colors by switching power, so for those a note says the light may cycle on and off a few times. |
 | **Light color** | The light's own color list (Jandy WaterColors, Pentair, Hayward, …). The panel's white ("Alpine White", "Cloud White") is shown as **White**. |
 | **Spa Set Temp** | `spa_set_point`, from `SPA_MIN` to `SPA_MAX`. |
 | **Pool Set Temp** | One bar with two handles: **Heat** (the low set point, `pool_set_point`) and **Chill** (the high one, `pool_chill_set_point`; heat pumps with chill only). |
-| **Bubbles / Water Features / Spillover** | Switches the mapped device on or off. Spillover and Water Features can't both be on. |
+| **Guest toggles** (by default Bubbles / Spillover / Water Features) | Switch their device on or off (`POST /api/toggle`). Each shows in Pool mode, Spa mode or both. Toggles marked as conflicting can't both be on: the other one is greyed out with "Turn off … first", and the server refuses it too. By default Spillover and Water Features conflict. |
 | **Water Temp / Air Temp** | `spa_temp` or `pool_temp` (depending on the mode) / `air_temp`. |
 | **Weather** | An [Open-Meteo](https://open-meteo.com) forecast for the next 6 hours (temperature, chance of rain, cloud cover, humidity), cached for 10 minutes. |
 | **Swim rating** | One sentence under the forecast, e.g. "**Perfect** for swimming: 84° water, sunny and calm." It combines the Jandy's pool water temperature with the forecast's feels-like temperature, wind, humidity, clouds, day/night and upcoming rain or storms (`app/comfort.py`). Storms always override. Without a fresh water reading (pump off, spa mode, controller offline) it rates the air conditions and says why. |
@@ -174,7 +193,7 @@ The dot next to the title shows whether the server can reach your pool controlle
 when it can, red when it can't.
 
 **Pool cover hint.** While the panel reports the pool cover as closed (`cover_pool` = `1`),
-a line under Spillover and Water Features says the panel blocks them while covered. It
+a line under the pool-mode toggles says the panel may block some pool features while covered. It
 only informs: the toggles stay usable, because the `0` = uncovered reading hasn't been
 confirmed on a real panel yet. Turn it off with `POOL_COVER_HINT=0`.
 
@@ -186,12 +205,80 @@ sections, and the header shows which one you're in:
 
 | Section | What's in it |
 |---|---|
-| **Settings** (opens first) | The app's own configuration: Main page, Temperature limits, Hot Tub On / Off and Guest toggles (coming), and **QR codes & sign** |
-| **Advanced** | Owner controls (coming) |
+| **Settings** (opens first) | The app's own configuration: Main page, Temperature limits, Hot Tub On / Off, Guest toggles, Weather. Anyone can read it; changing it needs the owner PIN. Also **QR codes & sign** |
+| **Advanced** | Owner controls for every device on the panel (needs the owner PIN) |
 | **Equipment status** | The read-only panel report described below |
 
 When any Equipment status row is flagged, the gear (and the ☰ button and its
 "Equipment status" item) shows the number of alerts, so you notice without opening it.
+
+### Owner PIN
+
+Set `OWNER_PIN` (4-12 digits) to turn on the owner features. Without it, Advanced and the
+Settings forms say "Owner controls are off — set OWNER_PIN on the server" and Settings
+stay read-only.
+
+Advanced, and the top of Settings, show a PIN field (a number pad on phones). A correct PIN
+sets an HttpOnly cookie on that browser for 30 days; the page never stores the PIN itself.
+**Lock** ends it on that browser. Changing `OWNER_PIN` (or `OWNER_SECRET`) logs every owner
+out; without `OWNER_SECRET`, so does a restart. Wrong PINs are limited (5 per 5 minutes per
+client, 10 per 15 minutes overall); while limited, the page counts down until you can try
+again. Behind a reverse proxy, set `OWNER_TRUSTED_PROXIES` so the limit is per real client.
+
+### Settings
+
+Read-only until you enter the owner PIN. One **Save** at the bottom saves the whole page
+(it sticks to the bottom of the sheet while there are unsaved changes; **Discard** drops
+them). Changes apply right away, with no restart, and every open page picks them up within
+a few seconds.
+
+| Part | What it sets |
+|---|---|
+| **Main page** | Which parts guests see: weather card, 6-hour forecast chart, swim rating, water/air temperature, Hot Tub On / Off buttons, light switch, light color, set temperatures, guest toggles. These only hide things on the page; the server doesn't enforce them |
+| **Temperature limits** | Spa lowest/highest, pool heat lowest/highest, pool chill highest, and how far chill stays above heat. Checked as you type with the server's rules (whole numbers, 34-104, lowest ≤ highest, heat lowest + spread ≤ chill highest) |
+| **Hot Tub On / Off** | The steps each button runs, in order (up to 12): switch a pump, heater, heat pump, aux or variable-speed pump on/off; turn a OneTouch scene on/off; turn a light on, optionally with an effect; or cap the spa set point (it only ever lowers it, and never above the spa limit's highest). Add, remove and reorder steps |
+| **Guest toggles** | Up to 20 switches for guests: a label, a device (aux circuits, lights and OneTouch scenes, plus the devices the `JANDY_*_DEVICE` mapping gave Bubbles, Spillover and Water Features), Pool and/or Spa mode, and which other toggles it can't be on with (always both ways) |
+| **Weather** | The zip code and the name on the weather card |
+
+Device pickers list what the panel reports (key and label). If someone saves Settings
+elsewhere while you have unsaved changes, the page says so and offers **Reload** (your
+changes are dropped); a Save based on an old version is refused the same way. A rejected
+value shows the server's reason next to the field. **Reset to defaults** (after a
+confirmation) deletes the saved settings and goes back to the environment's defaults.
+
+#### Where settings are saved
+
+In `CONFIG_PATH` (default `/data/config.json`), written atomically. If that directory isn't
+writable, Save says "Settings storage isn't available" and the app keeps running on its
+defaults.
+
+- **Docker Compose:** `compose.yaml` mounts a named volume `pool-config` at `/data`.
+- **Kubernetes:** `k8s/` mounts a PersistentVolumeClaim named `pool-config-data` at `/data`.
+  The `deploy/dev/` overlay uses an `emptyDir` instead, so its settings are lost whenever
+  the pod is replaced.
+
+### Advanced
+
+Owner controls for everything the panel lets the app switch or set, without the guest
+limits but with the same safety (fresh state before each command, refused rather than
+guessed). Needs the owner PIN. The section reads the panel when you open it and every 10
+seconds while it stays open; it stops when you leave it or the tab is hidden.
+
+| Group | Controls |
+|---|---|
+| Pumps & heaters, Aux circuits | On/off for each. Unused virtual aux slots ("Aux V2", …) are folded under "Unused aux slots (N)" |
+| OneTouch scenes | On/off for each scene |
+| Heat pump | On/off and Heat / Chill |
+| Set points | Spa, pool heat and pool chill within the panel's own range (chill stays at least 1° above heat), with **Apply** |
+| Lights | On/off, effect, and brightness for dimmable lights |
+| Variable-speed pumps | On/off and speed preset, only if the panel has any |
+| Salt cell | Status and output; pool % and spa % with **Apply**; boost start (1-24 hours, pool or spillover), pause, resume and stop, as the cell's state allows. Marked **Unverified on this panel**: these commands follow iAqualink's documentation but haven't been confirmed on a real panel |
+
+Every change asks first, naming exactly what will happen ("Turn OFF Filter pump?"), and
+nothing is sent if you cancel. Risky ones (filter pump off, the All OFF scene, heat pump
+off, anything on the salt cell) are marked in red. While a command runs the control shows
+it's pending; afterwards the section redraws from the panel's answer, or shows the
+server's reason if it was refused.
 
 ### QR codes & sign
 
@@ -337,7 +424,9 @@ kubectl -n pool apply -k k8s/
   to the log.
 - **The API returns pool state only.** It never returns the account, serial or session.
   `python -m app.discover` prints only the last 4 characters of a serial.
-- **There is no authentication of its own.** See [Remote access](#remote-access).
+- **No guest login.** See [Remote access](#remote-access). The owner features use the
+  [owner PIN](#owner-pin): an HttpOnly, SameSite=Strict cookie, rate-limited unlocks, and
+  the PIN is never stored in the browser.
 - **The container** runs as uid 1000 with a read-only root filesystem, and needs no extra
   Linux capabilities.
 - **Outbound connections:**
@@ -364,10 +453,13 @@ Where things are:
 - `app/weather.py`: the forecast.
 - `app/comfort.py`: the swim rating (bands and rules documented in the module).
 - `app/discover.py`: the read-only device lister.
+- `app/config_store.py`: the saved Settings (validation, defaults, `CONFIG_PATH`).
+- `app/advanced.py`, `app/owner_auth.py`: the owner controls and the PIN gate.
 - `app/static/`: the UI, in plain HTML, CSS and JS with no build step and no CDNs.
-  `settings.js`/`settings.css` are the Settings sheet and QR sign; `app.js` draws the
-  Equipment status rows and has `renderSettings()`/`renderAdvanced()` hooks for the
-  configuration and owner-control sections.
+  `app.js` is the main page (driven by `/api/config` and `state.toggles`) and the
+  Equipment status rows; `settings.js`/`settings.css` are the Settings sheet and QR sign;
+  `owner.js`/`owner.css` are the owner PIN, the Settings forms, the Advanced controls and
+  the confirm dialog.
 - `app/static/vendor/`: third-party browser code, copied unchanged (see [Credits](#credits)).
 
 `tests/test_iaqualink_backend.py` runs the real library against a fake iAqualink cloud
@@ -388,7 +480,9 @@ purpose, and rerun the tests when you do.
 |---|---|
 | Red dot and "Can't reach the pool controller" | Wrong login (the log says "rejected the username/password"), the panel is offline in the iAqualink app, or there's no Internet connection |
 | A toggle says "try again" | The controller sent an incomplete update or is offline. The server refuses rather than guessing |
-| Spillover toggle missing | No device matches `JANDY_SPILLOVER_DEVICE`. Run `python -m app.discover` |
+| A guest toggle is missing | Its device isn't on the panel (default toggles come from the `JANDY_*_DEVICE` mapping; run `python -m app.discover`), it's set for the other mode, or Main page → Guest toggles is off. Check Settings → Guest toggles |
+| Advanced says "Owner controls are off" | `OWNER_PIN` isn't set, or isn't 4-12 digits (the log says so) |
+| Save says "Settings storage isn't available" | `CONFIG_PATH`'s directory isn't writable; mount a volume at `/data` |
 | Set point changes refused on a °C panel | Set the `SPA_*` and `POOL_*` limits in °C |
 | Weather card missing | No `WEATHER_ZIP` or `WEATHER_LAT`/`WEATHER_LON` is set, or Open-Meteo is unreachable |
 | No "Add to Home Screen" button on Android | The site isn't on HTTPS. Use Chrome's menu → Add to Home screen |
