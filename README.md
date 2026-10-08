@@ -8,10 +8,10 @@ the pool and spa without the iAqualink app or your account. They can:
 - set **temperatures**
 - toggle **Bubbles**, **Spillover** and **Water Features**
 
-It also shows the water and air temperature, a collapsed, read-only **Equipment status**
-section for the owner, an optional 6-hour **weather** forecast
+It also shows the water and air temperature, an optional 6-hour **weather** forecast
 with a one-line **"how's the swimming?"** rating, and can be added to a phone's home
-screen like an app.
+screen like an app. A **Settings** gear (top right) holds the owner's things: printable
+**QR codes** for guests, owner controls (coming) and a read-only **Equipment status**.
 
 It runs as one small container on your home network and talks to your pool through the
 iAqualink cloud, using [flz/iaqualink-py](https://github.com/flz/iaqualink-py) (the
@@ -30,6 +30,7 @@ aren't just limits on the sliders.
 - [Map the controls to your panel](#map-the-controls-to-your-panel)
 - [Configuration reference](#configuration-reference)
 - [What each control does](#what-each-control-does)
+- [Settings (the gear)](#settings-the-gear)
 - [Safety, and how it talks to the Jandy](#safety-and-how-it-talks-to-the-jandy)
 - [Add to Home Screen](#add-to-home-screen)
 - [Remote access](#remote-access)
@@ -37,6 +38,7 @@ aren't just limits on the sliders.
 - [Security notes](#security-notes)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
+- [Credits](#credits)
 
 ## What you need
 
@@ -176,14 +178,47 @@ a line under Spillover and Water Features says the panel blocks them while cover
 only informs: the toggles stay usable, because the `0` = uncovered reading hasn't been
 confirmed on a real panel yet. Turn it off with `POOL_COVER_HINT=0`.
 
-### Equipment status (advanced)
+## Settings (the gear)
 
-A collapsed **Equipment status** card at the bottom of the page, meant for the owner.
+The gear at the top right of the title bar opens a Settings sheet. Close it with ✕,
+Escape, or a tap outside it. The ☰ button in its header switches between three
+sections, and the header shows which one you're in:
+
+| Section | What's in it |
+|---|---|
+| **Settings** (opens first) | The app's own configuration: Main page, Temperature limits, Hot Tub On / Off and Guest toggles (coming), and **QR codes & sign** |
+| **Advanced** | Owner controls (coming) |
+| **Equipment status** | The read-only panel report described below |
+
+When any Equipment status row is flagged, the gear (and the ☰ button and its
+"Equipment status" item) shows the number of alerts, so you notice without opening it.
+
+### QR codes & sign
+
+Makes QR codes in the browser, with nothing sent to the server or looked up online:
+
+- **Open the pool page.** Prefilled with the address you opened the page at. Change it
+  if guests should use another one, for example `https://pool.lab.kleincogroup.com` on
+  your home Wi-Fi.
+- **Join the Wi-Fi** (optional). Network name, password, security (WPA/WPA2/WPA3, or
+  None) and whether the network is hidden. This makes the standard
+  `WIFI:T:WPA;S:<name>;P:<password>;H:false;;` code that iPhone and Android cameras
+  offer to join; `\ ; , : "` in the name or password are escaped. **The password
+  stays in your browser**: it isn't sent to the server or saved anywhere, so you type
+  it again next time.
+- **Print sign** prints just a sign: your title (default "Pool & Spa"), then "1. Join
+  the Wi-Fi" and "2. Open the pool controls" side by side, with the network name and the
+  page address in text under the codes. Without Wi-Fi details it prints only the pool
+  code. Codes are SVG (sharp at any size) with error correction level M.
+
+### Equipment status
+
+A read-only **Equipment status** section in Settings, meant for the owner.
 It is **read-only**: it shows what the panel reported on the last refresh (the same
 `get_home`, `get_devices` and `get_onetouch` calls the page already makes) and never
 sends a command. It refreshes with the regular panel poll (every `POLL_SECONDS` while someone has the page open); while the panel's last reply was incomplete, the previous rows stay up. A field the panel
 leaves blank is left out. Rows that look abnormal get an amber background, and the
-collapsed header shows how many there are ("2 alerts").
+section, the ☰ menu and the gear show how many there are ("2 alerts").
 
 | Group | Rows |
 |---|---|
@@ -239,7 +274,7 @@ sent to the server.
   menu → Add to Home screen instead.
 
 For guests, the easiest way in is a **QR code** pointing at your URL, printed and placed
-by the pool.
+by the pool: Settings → **Print sign** makes one (see [QR codes & sign](#qr-codes--sign)).
 
 ## Remote access
 
@@ -330,6 +365,10 @@ Where things are:
 - `app/comfort.py`: the swim rating (bands and rules documented in the module).
 - `app/discover.py`: the read-only device lister.
 - `app/static/`: the UI, in plain HTML, CSS and JS with no build step and no CDNs.
+  `settings.js`/`settings.css` are the Settings sheet and QR sign; `app.js` draws the
+  Equipment status rows and has `renderSettings()`/`renderAdvanced()` hooks for the
+  configuration and owner-control sections.
+- `app/static/vendor/`: third-party browser code, copied unchanged (see [Credits](#credits)).
 
 `tests/test_iaqualink_backend.py` runs the real library against a fake iAqualink cloud
 built from recorded panel responses, so the exact wire commands are checked without a
@@ -353,3 +392,16 @@ purpose, and rerun the tests when you do.
 | Set point changes refused on a °C panel | Set the `SPA_*` and `POOL_*` limits in °C |
 | Weather card missing | No `WEATHER_ZIP` or `WEATHER_LAT`/`WEATHER_LON` is set, or Open-Meteo is unreachable |
 | No "Add to Home Screen" button on Android | The site isn't on HTTPS. Use Chrome's menu → Add to Home screen |
+
+## Credits
+
+- [flz/iaqualink-py](https://github.com/flz/iaqualink-py) talks to iAqualink.
+- [Open-Meteo](https://open-meteo.com) and [Zippopotam.us](https://zippopotam.us) for the
+  weather card.
+- QR codes are made with Kazuhiko Arase's
+  [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) **2.0.4** (MIT
+  license, Copyright (c) 2009 Kazuhiko Arase): `app/static/vendor/qrcode-generator-2.0.4.js`
+  is the npm package's `dist/qrcode.js`, unchanged, license header included. To update it,
+  replace the file with a newer release's `dist/qrcode.js` and change the version in the
+  file name, `index.html` and here. "QR Code" is a registered trademark of DENSO WAVE
+  INCORPORATED.

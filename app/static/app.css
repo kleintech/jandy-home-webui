@@ -636,7 +636,7 @@ input[type="range"]::-moz-range-thumb {
 /* ---------- Focus ---------- */
 :focus { outline: none; }
 .seg:focus-visible, .toggle:focus-visible, .chip:focus-visible,
-.color-btn:focus-visible, .sheet-close:focus-visible, .equip-sum:focus-visible {
+.color-btn:focus-visible, .sheet-close:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
 }
@@ -677,26 +677,8 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px colo
 /* "Light Color" wraps onto two lines on narrow phones instead of truncating. */
 .light-row .color-btn .toggle-label { white-space: normal; overflow: visible; line-height: 1.15; }
 
-/* ---------- Equipment status (owner's read-only advanced section) ---------- */
-/* A collapsed <details> card at the bottom; quiet so guests pass it by. */
-.card.equip { padding: 0; }
-.equip-sum {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: var(--tap);
-  padding: 4px 16px;
-  border-radius: var(--radius);
-  list-style: none;
-  cursor: pointer;
-  color: var(--muted);
-  font-size: 15px;
-  font-weight: 600;
-  -webkit-user-select: none;
-  user-select: none;
-}
-.equip-sum::-webkit-details-marker { display: none; }
-.equip-title { flex: 1 1 auto; min-width: 0; }
+/* ---------- Equipment status (read-only, in the Settings sheet) ---------- */
+/* Rows drawn by app.js; the section and its heading are styled in settings.css. */
 .equip-flag {
   flex: none;
   padding: 2px 8px;
@@ -706,10 +688,7 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px colo
   color: var(--warn-text);
   background: color-mix(in srgb, var(--warn) 16%, transparent);
 }
-.equip-chev { flex: none; transition: transform .2s; }
-.equip[open] .equip-chev { transform: rotate(180deg); }
-.equip[open] .equip-sum { color: var(--text); }
-.equip-body { padding: 0 16px 8px; }
+.equip-body { padding: 0; }
 .eq-group { margin: 0 0 10px; }
 .eq-head {
   overflow-wrap: anywhere;

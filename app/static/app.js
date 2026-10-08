@@ -67,6 +67,12 @@
     coverHint: $('cover-hint'),
     equipFlag: $('equip-flag'),
     equipBody: $('equip-body'),
+    settingsBadge: $('settings-badge'),
+    menuBadge: $('menu-btn-badge'),
+    equipMenuBadge: $('equip-menu-badge'),
+    advRoot: $('adv-root'),
+    viewSettings: $('view-settings'),
+    settingsBadgeText: $('settings-badge-text'),
     toast: $('toast'),
   };
 
@@ -649,9 +655,11 @@
     el.poolMax.textContent = hi + '°';
   }
 
-  // ---------- equipment status (read-only, owner's advanced section) ----------
+  // ---------- equipment status (read-only, in the Settings panel) ----------
   // Rows come from state.equipment.groups; this only draws them (textContent,
-  // never HTML: labels come from the panel). Redrawn only when something changed.
+  // never HTML: labels come from the panel). Redrawn only when something changed,
+  // on every poll whether or not Settings is open. The alert count is also shown
+  // as a badge on the Settings (gear) button so the owner notices it.
   function updatedText(iso) {
     const d = iso ? new Date(iso) : null;
     if (!d || isNaN(d)) return null;
@@ -718,6 +726,33 @@
     }
     el.equipFlag.hidden = warnings === 0;
     el.equipFlag.textContent = warnings === 1 ? '1 alert' : `${warnings} alerts`;
+    el.settingsBadge.hidden = warnings === 0;
+    el.settingsBadge.textContent = warnings > 9 ? '9+' : String(warnings);
+    el.settingsBadgeText.textContent = warnings === 0 ? ''
+      : warnings === 1 ? '1 equipment alert' : `${warnings} equipment alerts`;
+    // Same count on the Settings sheet's ☰ button and next to its "Equipment status" item.
+    el.menuBadge.hidden = el.equipMenuBadge.hidden = warnings === 0;
+    el.menuBadge.textContent = el.settingsBadge.textContent;
+    el.equipMenuBadge.textContent = el.equipFlag.textContent;
+  }
+
+  // ---------- Settings (app configuration, Settings sheet → ☰ → Settings) ----------
+  // HOOK: the configuration forms (#set-main "Main page", #set-limits
+  // "Temperature limits", #set-hottub "Hot Tub On / Off", #set-toggles "Guest
+  // toggles") render from here, replacing each "Coming soon" placeholder.
+  // Called from render() on every state change. "QR codes & sign" (#qr) is
+  // client-only and lives in settings.js; leave it alone.
+  function renderSettings() {
+    if (!el.viewSettings) return;
+  }
+
+  // ---------- Advanced (owner controls, Settings sheet → ☰ → Advanced) ----------
+  // HOOK: owner controls render into el.advRoot (<section id="adv-root">) from
+  // here. Called from render() on every state change, like renderEquipment();
+  // replace the "Owner controls coming soon" placeholder (#adv-placeholder).
+  // Nothing yet: the stub exists so the controls have one place to hook in.
+  function renderAdvanced() {
+    if (!el.advRoot) return;
   }
 
   function render() {
@@ -738,6 +773,8 @@
     }
     el.body.classList.remove('loading');
     renderEquipment();
+    renderSettings();
+    renderAdvanced();
 
     const connected = controlsEnabled();
     const mode = view('mode') === 'spa' ? 'spa' : 'pool';

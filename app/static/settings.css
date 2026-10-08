@@ -1,0 +1,225 @@
+/* Pool & Spa: Settings gear, Settings sheet (equipment status, QR codes) and
+   the printed QR sign. Uses the colour tokens from app.css. */
+
+/* ---------- Gear (top right of the title bar) ---------- */
+.icon-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.icon-btn:hover { color: var(--text); }
+.icon-btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.settings-btn { margin: -6px -10px -6px auto; }   /* far right; keeps the bar's height */
+.settings-badge {
+  position: absolute;
+  top: 3px;
+  right: 1px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--warn);
+  color: #1a1203;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 0 2px var(--bg);
+  pointer-events: none;
+}
+
+/* ---------- Settings sheet ---------- */
+/* Same bottom sheet as the light colors, but (nearly) full height. */
+dialog.settings-sheet {
+  height: 92vh;
+  height: 92dvh;
+  max-height: 92vh;
+  max-height: 92dvh;
+}
+/* Fill the dialog so a click on the dialog element itself is a backdrop tap. */
+.settings-inner { min-height: 100%; padding-top: 0; }
+.settings-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0 -4px 4px;
+  padding: 8px 4px 4px;
+  background: var(--card);
+}
+
+.settings-head .sheet-head { margin-bottom: 0; }
+.menu-btn { margin-left: -8px; color: var(--text); }
+.settings-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 6px;
+}
+.settings-title:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.menu-btn[aria-expanded="true"] { background: var(--seg-bg); }
+
+/* The ☰ menu: drops down under the header, over the section below. */
+.settings-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin: 0 -4px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .22);
+}
+.settings-menu ul { margin: 0; padding: 0; list-style: none; }
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.menu-item:hover { background: var(--seg-bg); }
+.menu-item[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
+.menu-item:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; }
+.menu-item .equip-flag { margin-left: auto; }
+
+.set-sec { padding: 4px 0 12px; border-top: 1px solid var(--border); }
+.set-view > .set-sec:first-child { border-top: 0; }
+.set-sec + .set-sec { margin-top: 8px; }
+.set-placeholder { margin-top: 2px; }
+.equip-flag-row { margin: 8px 2px 0; }
+.equip-flag-row:has(> [hidden]) { display: none; }
+.set-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 2px 4px;
+}
+.set-sec-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.set-sec .note { margin-top: 4px; }
+
+/* ---------- QR generators ---------- */
+.qr-gen { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--border); }
+.qr-gen:first-of-type { border-top: 0; padding-top: 0; }
+.qr-gen-title { margin: 0 2px 8px; font-size: 16px; font-weight: 700; }
+.qr-opt { font-weight: 500; color: var(--muted); }
+
+.field { display: block; margin: 0 0 10px; }
+.field-label { display: block; margin: 0 2px 4px; font-size: 14px; font-weight: 600; color: var(--muted); }
+.field input[type="text"], .field input[type="url"], .field select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 17px;   /* >= 16px: iOS doesn't zoom on focus */
+}
+.field input:disabled { opacity: .5; }
+.field input:focus-visible, .field select:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 1px;
+}
+.field-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 4px 16px; }
+.field-row .field { flex: 1 1 200px; }
+.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin: 0 2px 10px;
+  font-size: 16px;
+  cursor: pointer;
+}
+.check input { width: 22px; height: 22px; margin: 0; accent-color: var(--accent); }
+.check input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.qr-code:empty { display: none; }
+.qr-code { margin: 4px 0 6px; }
+/* Always dark-on-white, also in dark mode: that's what cameras read. */
+.qr-svg {
+  display: block;
+  width: 100%;
+  max-width: 220px;
+  height: auto;
+  margin: 0 auto;
+  border-radius: 8px;
+}
+.qr-msg { text-align: center; }
+
+.btn-primary {
+  display: block;
+  width: 100%;
+  min-height: var(--tap);
+  margin: 4px 0 6px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 700;
+  font-size: 17px;
+  cursor: pointer;
+}
+.btn-primary:disabled { opacity: .45; cursor: default; }
+.btn-primary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
+/* ---------- Printed sign ---------- */
+/* Never shown on screen. While "Print sign" runs (body.printing-sign), print
+   shows only the sign; any other print of the page prints the page as before. */
+.print-sign { display: none; }
+
+@media print {
+  body.printing-sign { background: #fff; color: #000; min-height: 0; padding: 0; }
+  body.printing-sign > *:not(#print-sign) { display: none !important; }
+  body.printing-sign > #print-sign { display: block !important; }
+  @page { margin: 15mm; }
+}
+.print-sign {
+  color: #000;
+  background: #fff;
+  font-family: var(--font);
+  text-align: center;
+}
+.ps-title { margin: 0 0 12mm; font-size: 34pt; font-weight: 800; letter-spacing: -.01em; }
+.ps-codes { display: flex; justify-content: center; align-items: flex-start; gap: 14mm; }
+.ps-fig { flex: 0 1 80mm; margin: 0; break-inside: avoid; }
+.ps-code .qr-svg { width: 100%; max-width: 75mm; border-radius: 0; }
+.ps-fig figcaption { margin-top: 3mm; }
+.ps-cap { display: block; font-size: 18pt; font-weight: 700; }
+.ps-sub { display: block; margin-top: 2mm; font-size: 12pt; overflow-wrap: anywhere; }
+.ps-url { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
