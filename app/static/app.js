@@ -81,7 +81,6 @@
   const view = (path) => (path in overrides ? overrides[path] : getPath(state, path));
   const num = (v) => (typeof v === 'number' && isFinite(v) ? v : null);
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-  const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
   const unit = () => '°' + ((state && state.unit) || 'F');
 
   function setTemp(node, value) {
@@ -687,7 +686,8 @@
     el.modePool.disabled = el.modeSpa.disabled = !connected || busy;
     const target = modePending ? view('mode') : lastRequestedMode;
     el.busy.hidden = !busy;
-    el.busyText.textContent = target ? `Switching to ${cap(target)}…` : 'Changing mode…';
+    el.busyText.textContent = target === 'spa' ? 'Turning the hot tub on…'
+      : target === 'pool' ? 'Turning the hot tub off…' : 'Changing mode…';
 
     // light
     const light = state.light || {};
