@@ -9,4 +9,4 @@ resources:
 images:
   # Immutable git-SHA tag, never "latest".
   - name: registry.lab.kleincogroup.com/jandy-home-webui/pool
-    newTag: 741df58be2c9ca346eea45e6a2265eba593ae00d
+    newTag: 8609ab57636d745ab2359284c380bfc3b81c20a8
