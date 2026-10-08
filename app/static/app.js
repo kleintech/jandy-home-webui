@@ -663,7 +663,11 @@
   let renderedEquip = '';
   function renderEquipment() {
     const eq = state && state.equipment;
-    const groups = eq && Array.isArray(eq.groups) ? eq.groups.filter((g) => g && Array.isArray(g.rows)) : [];
+    // Drop malformed groups/rows up front: one bad row must not take the card down.
+    const groups = eq && Array.isArray(eq.groups)
+      ? eq.groups.filter((g) => g && Array.isArray(g.rows))
+        .map((g) => ({ ...g, rows: g.rows.filter((r) => r && typeof r === 'object') }))
+      : [];
     const updated = updatedText(state && state.updated_at);
     const sig = JSON.stringify([groups, updated]);
     if (sig === renderedEquip) return;
@@ -685,8 +689,9 @@
       dl.className = 'eq-rows';
       for (const r of panelRows(g)) {
         const row = document.createElement('div');
-        row.className = 'eq-row' + (r.warn ? ' warn' : '');
-        if (r.warn) warnings += 1;
+        const warn = r.warn === true;
+        row.className = 'eq-row' + (warn ? ' warn' : '');
+        if (warn) warnings += 1;
         const dt = document.createElement('dt');
         dt.textContent = String(r.label ?? '');
         const dd = document.createElement('dd');
@@ -819,7 +824,7 @@
       el.wfHint.hidden = !spill;
       // Informational only: the cover_pool 1/0 mapping isn't confirmed, so the
       // toggles stay usable and the panel has the final say.
-      el.coverHint.hidden = pool.cover_hint !== true;
+      el.coverHint.hidden = !(pool.cover_hint === true && pool.covered === true);
     }
   }
 

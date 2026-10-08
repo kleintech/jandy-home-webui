@@ -712,6 +712,7 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px colo
 .equip-body { padding: 0 16px 8px; }
 .eq-group { margin: 0 0 10px; }
 .eq-head {
+  overflow-wrap: anywhere;
   margin: 10px 2px 2px;
   font-size: 12px;
   font-weight: 700;
@@ -730,7 +731,7 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px colo
   font-size: 15px;
 }
 .eq-row:first-child { border-top: 0; }
-.eq-row dt { flex: 0 1 auto; min-width: 0; color: var(--muted); }
+.eq-row dt { flex: 0 1 auto; min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
 .eq-row dd {
   flex: 0 1 auto;
   min-width: 0;

@@ -25,6 +25,7 @@ fault). Serials, emails, tokens and session IDs never appear.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable
 from typing import Any
@@ -208,7 +209,7 @@ def build(
             salt_rows.append(_row("swc_status", "Salt cell",
                                   known or f"{st} (possible fault)", warn=known is None))
         out = swc.get("swcPoolValue")
-        if isinstance(out, (int, float)) and not isinstance(out, bool):
+        if isinstance(out, (int, float)) and not isinstance(out, bool) and math.isfinite(out):
             salt_rows.append(_row("swc_output", "Salt cell output", f"{out:g}%"))
         elif _text(out).replace(".", "", 1).isdigit():
             salt_rows.append(_row("swc_output", "Salt cell output", f"{_text(out)}%"))

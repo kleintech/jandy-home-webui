@@ -181,7 +181,7 @@ confirmed on a real panel yet. Turn it off with `POOL_COVER_HINT=0`.
 A collapsed **Equipment status** card at the bottom of the page, meant for the owner.
 It is **read-only**: it shows what the panel reported on the last refresh (the same
 `get_home`, `get_devices` and `get_onetouch` calls the page already makes) and never
-sends a command. It updates with the normal 5-second state poll. A field the panel
+sends a command. It refreshes with the regular panel poll (every `POLL_SECONDS` while someone has the page open); while the panel's last reply was incomplete, the previous rows stay up. A field the panel
 leaves blank is left out. Rows that look abnormal get an amber background, and the
 collapsed header shows how many there are ("2 alerts").
 

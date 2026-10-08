@@ -333,3 +333,10 @@ def test_state_shape_without_backend_data():
     eq = s.state()["equipment"]
     assert eq["groups"][0]["id"] == "panel"
     assert rows(eq)["status"]["value"] == "Not reachable"
+
+
+def test_non_finite_salt_output_is_omitted():
+    # Bug: a NaN/Infinity output (Python's json accepts those tokens) rendered "nan%".
+    for bad in (float("nan"), float("inf")):
+        rows = [r for g in equipment.build({"swc_info": {"isswcPresent": True, "swcPoolValue": bad}})["groups"] for r in g["rows"]]
+        assert not any(r["id"] == "swc_output" for r in rows)
