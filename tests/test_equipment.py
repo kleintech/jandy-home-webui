@@ -113,6 +113,11 @@ def test_panel_model_decoded_from_trailing_ascii():
     # Bug: model/firmware string lost, or binary junk before it shown.
     assert equipment.panel_model(hexed(b"B0316823 RS-4 Combo")) == "B0316823 RS-4 Combo"
     assert equipment.panel_model(hexed(b"B0316823 RS-4 Combo\x00\x00")) == "B0316823 RS-4 Combo"
+    # Bug: the real panel (2026-10-08) follows the string with status bytes, so a
+    # "trailing run only" decoder found nothing and the Model row vanished.
+    real = ("AQU='70','12 00 01 02 03 05 06 07 08 0E 0F 19 1A 1D 1F 20 21 24 25 01 00 00 00 00 56 00 64 00 "
+            "41 00 56 00 00 01 00 19 1B 42 30 33 31 36 38 32 33 20 52 53 2D 34 20 43 6F 6D 62 6F 00 00 00 5C 00 37'")
+    assert equipment.panel_model(real) == "B0316823 RS-4 Combo"
 
 
 @pytest.mark.parametrize("resp", ["AQU=XXXX", "AQU='71','B0316823 RS-4 Combo'", "AQU='70','zz yy'",

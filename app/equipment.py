@@ -109,7 +109,7 @@ def panel_model(response: Any, secrets: Iterable[str] = ()) -> str | None:
     """Best-effort panel model/firmware from the `response` field.
 
     `get_home` carries `AQU='70','<hex bytes>'`, whose bytes end with an ASCII
-    string such as "B0316823 RS-4 Combo". Only the trailing printable run is kept,
+    string such as "B0316823 RS-4 Combo" (then a few status bytes). The last printable run of 6+ characters is kept,
     and only if it looks like text; anything that matches a known secret (the
     serial) is dropped. Returns None when nothing usable is found.
     """
@@ -122,10 +122,13 @@ def panel_model(response: Any, secrets: Iterable[str] = ()) -> str | None:
     if not hexdigits or len(hexdigits) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", hexdigits):
         return None
     data = bytes.fromhex(hexdigits)
-    tail = re.search(rb"[\x20-\x7e]+$", data.rstrip(b"\x00"))
-    if not tail:
+    # The model string is followed by a few status bytes on real panels
+    # (e.g. "...Combo\x00\x00\x00\x5c\x00\x37"), so take the LAST printable run
+    # long enough to be text rather than a run at the very end.
+    runs = [r for r in re.findall(rb"[\x20-\x7e]{6,}", data) if re.search(rb"[A-Za-z]", r)]
+    if not runs:
         return None
-    text = " ".join(tail.group(0).decode("ascii").split())
+    text = " ".join(runs[-1].decode("ascii").split())
     if len(text) < 4 or not re.search(r"[A-Za-z]", text) or len(text) > MAX_TEXT:
         return None
     for secret in secrets:
