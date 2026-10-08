@@ -5,6 +5,7 @@
   "use strict";
 
   var root = document.getElementById("weather");
+  var chartOpen = false;
   if (!root) return;
 
   var REFRESH_MS = 10 * 60 * 1000;
@@ -142,6 +143,11 @@
 
   function render() {
     var d = data, c = d.current;
+    // Rebuilding the card would drop keyboard focus; remember what had it.
+    var ae = document.activeElement;
+    var refocus = ae && root.contains(ae)
+      ? (ae.classList.contains("wx-more-sum") ? ".wx-more-sum" : ae.classList.contains("wx-chart") ? ".wx-chart" : null)
+      : null;
     root.textContent = "";
 
     var head = el("div", "wx-head");
@@ -176,6 +182,18 @@
     if (swim) root.appendChild(swim);
     if (d.stale && d.updated_at) root.appendChild(el("p", "wx-stale", "Forecast as of " + clock(d.updated_at, true)));
 
+    // The chart sits behind a disclosure, closed by default; its open state
+    // survives the 10-minute re-render.
+    var more = el("details", "wx-more");
+    more.open = chartOpen;
+    var sum = el("summary", "wx-more-sum");
+    sum.appendChild(el("span", "wx-more-label", "6-hour forecast chart"));
+    var chev = el("span", "wx-more-chev");
+    chev.setAttribute("aria-hidden", "true");
+    chev.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    sum.appendChild(chev);
+    more.appendChild(sum);
+
     var legend = el("ul", "wx-legend");
     legend.setAttribute("aria-hidden", "true");
     var keys = [["temp", "Temp"], ["rain", "Rain %"], ["cloud", "Clouds"]];
@@ -186,12 +204,22 @@
       li.appendChild(document.createTextNode(p[1]));
       legend.appendChild(li);
     });
-    root.appendChild(legend);
+    more.appendChild(legend);
 
     var chart = el("div", "wx-chart");
-    root.appendChild(chart);
+    more.appendChild(chart);
+    root.appendChild(more);
     root.appendChild(table(d.hourly));
-    drawChart(chart, d.hourly);
+    // Draw only while open. Setting more.open above fires "toggle" (async), which
+    // does the draw, so there's no synchronous draw here (it would draw twice).
+    more.addEventListener("toggle", function () {
+      chartOpen = more.open;
+      if (chartOpen && data) drawChart(chart, data.hourly);
+    });
+    if (refocus) {
+      var target = root.querySelector(refocus);
+      if (target) target.focus({ preventScroll: true });
+    }
   }
 
   // Screen-reader table of the same series (the chart itself is role="img").
@@ -201,7 +229,9 @@
     var wrap = el("div", "wx-sr");
     var tbl = el("table");
     wrap.appendChild(tbl);
-    tbl.appendChild(el("caption", null, "Forecast, next 6 hours"));
+    // The chart (and its aria-label) only exists once opened; the caption carries
+    // the same spoken summary while it is closed.
+    tbl.appendChild(el("caption", null, ariaSummary(rows) || "Forecast, next 6 hours"));
     var hr = el("tr");
     var withHum = hasHumidity(rows);
     var heads = ["Time", "Temp", "Rain chance", "Cloud cover"];
@@ -569,7 +599,7 @@
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(function () {
       var chart = root.querySelector(".wx-chart");
-      if (data && chart && Math.abs(chart.clientWidth - lastWidth) > 2) drawChart(chart, data.hourly);
+      if (data && chart && chartOpen && Math.abs(chart.clientWidth - lastWidth) > 2) drawChart(chart, data.hourly);
     }, 150);
   });
 
