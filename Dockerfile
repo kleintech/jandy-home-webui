@@ -18,6 +18,9 @@ ENV PATH=/venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=8080
 COPY --from=build /venv /venv
 WORKDIR /srv
 COPY app ./app
+# Saved owner settings (CONFIG_PATH=/data/config.json). Mount a volume here; the
+# directory is owned by the app user so a fresh Docker named volume is writable.
+RUN mkdir -p /data && chown 1000:1000 /data
 USER 1000:1000
 EXPOSE 8080
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*'"]

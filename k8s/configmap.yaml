@@ -16,3 +16,6 @@ data:
   POOL_HEAT_MIN: "82"
   POOL_CHILL_MAX: "92"
   POOL_MIN_SPREAD: "5"
+  # Owner settings saved from the page (on the pool-config-data volume). Once saved,
+  # they replace the limits above; delete the file (Settings > Reset) to go back.
+  CONFIG_PATH: /data/config.json

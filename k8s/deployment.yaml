@@ -20,6 +20,13 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+        # The image runs as uid 1000; make the settings volume writable for it.
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      volumes:
+        - name: config-data
+          persistentVolumeClaim:
+            claimName: pool-config-data
       containers:
         - name: pool
           # Tag is set in kustomization.yaml.
@@ -41,6 +48,10 @@ spec:
             - secretRef:
                 name: iaqualink-credentials
                 optional: true
+          # The root filesystem is read-only; saved settings live here.
+          volumeMounts:
+            - name: config-data
+              mountPath: /data
           readinessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 10

@@ -95,6 +95,17 @@ def describe(code: Any, is_day: bool = True) -> tuple[str, str]:
     return desc, icon
 
 
+def env_tz() -> str:
+    tz = os.environ.get("WEATHER_TZ") or DEFAULT_TZ
+    if tz != "auto":
+        try:
+            ZoneInfo(tz)
+        except Exception:
+            log.warning("ignoring invalid WEATHER_TZ=%r", tz)
+            tz = DEFAULT_TZ
+    return tz
+
+
 @dataclass(frozen=True)
 class Config:
     """Where to forecast. No location is built in: set WEATHER_LAT + WEATHER_LON, or
@@ -120,13 +131,7 @@ class Config:
                 return None
             return v
 
-        tz = os.environ.get("WEATHER_TZ") or DEFAULT_TZ
-        if tz != "auto":
-            try:
-                ZoneInfo(tz)
-            except Exception:
-                log.warning("ignoring invalid WEATHER_TZ=%r", tz)
-                tz = DEFAULT_TZ
+        tz = env_tz()
         label = os.environ.get("WEATHER_LABEL") or ""
         lat, lon = f("WEATHER_LAT"), f("WEATHER_LON")
         if lat is not None and lon is not None:
@@ -137,6 +142,27 @@ class Config:
                        country=(os.environ.get("WEATHER_COUNTRY") or "us").lower())
         log.info("weather card off: set WEATHER_ZIP or WEATHER_LAT/WEATHER_LON to enable it")
         return None
+
+    @classmethod
+    def from_doc(cls, doc: dict[str, Any] | None) -> "Config | None":
+        """From the settings' `weather` section ({zip, country, lat, lon, label});
+        coordinates win over a zip, as with the env vars. None = card off."""
+        if not doc:
+            return None
+        label = doc.get("label") or ""
+        lat, lon = doc.get("lat"), doc.get("lon")
+        if lat is not None and lon is not None:
+            return cls(lat=float(lat), lon=float(lon), label=label, tz=env_tz())
+        zip_code = (doc.get("zip") or "").strip()
+        if zip_code:
+            return cls(label=label, tz=env_tz(), zip=zip_code, country=(doc.get("country") or "us").lower())
+        return None
+
+    def location(self) -> tuple:
+        """What was asked for (not what geocoding filled in), to spot a change."""
+        if self.zip and self.lat is None:
+            return ("zip", self.zip, self.country, self.label)
+        return ("ll", self.lat, self.lon, self.label)
 
     def params(self) -> dict[str, Any]:
         return {
@@ -432,6 +458,25 @@ class WeatherService:
         self._raw: dict[str, Any] | None = None
         self._fetched_at: float | None = None   # epoch seconds of last good data
         self._next_try = 0.0                    # epoch seconds; earliest next refresh
+        # Where the env (WEATHER_*) points; used while there are no saved settings.
+        self.base_cfg = self.cfg
+        self._loc = self.cfg.location() if self.cfg is not None else None
+        self._gen = 0                           # bumped when the location changes
+
+    def set_location(self, cfg: Config | None) -> bool:
+        """Point the card at another place (from the settings). A change drops the
+        cached forecast so the next request fetches for the new place. Returns
+        whether anything changed."""
+        loc = cfg.location() if cfg is not None else None
+        if loc == self._loc:
+            return False
+        log.info("weather location changed")
+        self.cfg, self._loc = cfg, loc
+        self._gen += 1
+        self._raw = None
+        self._fetched_at = None
+        self._next_try = 0.0
+        return True
 
     def _now_local(self) -> datetime:
         # Aware; build_payload converts it into the response's own fixed offset.
@@ -450,17 +495,26 @@ class WeatherService:
             now = self._clock()
             if now < self._next_try:      # another request refreshed while we waited
                 return
+            gen, cfg = self._gen, self.cfg
+            if cfg is None:
+                return
             try:
-                if self.cfg.lat is None:
-                    self.cfg = await self._geocode(self.cfg)
-                raw = await self._fetch(self.cfg)
+                if cfg.lat is None:
+                    cfg = await self._geocode(cfg)
+                    if gen == self._gen:
+                        self.cfg = cfg  # geocode once, even if the forecast fails
+                raw = await self._fetch(cfg)
                 # Validate before replacing known-good data.
-                build_payload(raw, self.cfg, self._now_local(),
+                build_payload(raw, cfg, self._now_local(),
                               datetime.fromtimestamp(now).astimezone(), False)
             except Exception as exc:  # noqa: BLE001 - weather must never raise
                 log.warning("weather refresh failed: %s", exc)
-                self._next_try = now + RETRY_SECONDS
+                if gen == self._gen:
+                    self._next_try = now + RETRY_SECONDS
                 return
+            if gen != self._gen:
+                return  # the location changed while this was in flight
+            self.cfg = cfg
             self._raw = raw
             self._fetched_at = now
             self._next_try = now + CACHE_SECONDS
@@ -563,6 +617,16 @@ def add_swim(data: dict[str, Any], water_f: float | None, reason: str | None = N
 @router.get("/api/weather")
 async def weather(request: Request):
     service = get_service()
+    try:
+        # The location comes from the live settings when the app has them.
+        # Without saved settings that is the env location this service started with.
+        svc = getattr(request.app.state, "svc", None)
+        store = getattr(svc, "config", None)
+        if store is not None and callable(getattr(svc, "app_config", None)):
+            service.set_location(Config.from_doc(svc.app_config().weather.model_dump())
+                                 if store.saved else service.base_cfg)
+    except Exception as exc:  # noqa: BLE001 - weather must never raise
+        log.warning("weather location from settings failed: %s", exc)
     data = await service.get()
     try:
         water, reason = pool_water_f(request)

@@ -5,14 +5,16 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from typing import Any
+
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from . import advanced, owner_auth, weather
+from . import advanced, config_store, owner_auth, weather
 from .backends.base import Backend, BackendError
-from .service import Limits, PoolService, RuleError
+from .service import Limits, PoolService, RuleError, SequenceError, UnknownToggle
 
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger(__name__)
@@ -23,6 +25,11 @@ class Mode(BaseModel):
 
 class OnOff(BaseModel):
     on: bool
+
+class ToggleReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=30)
+    on: StrictBool
 
 class Color(BaseModel):
     color: str
@@ -60,16 +67,12 @@ def limits_from_env() -> Limits:
         min_spread=i("POOL_MIN_SPREAD", d.min_spread),
     )
     # Fail fast: inverted limits would make every set point request fail, and a
-    # negative spread would let chill drop below heat.
-    problems = [
-        msg for bad, msg in [
-            (lim.spa_min > lim.spa_max, "SPA_MIN > SPA_MAX"),
-            (lim.min_spread < 0, "POOL_MIN_SPREAD < 0"),
-            (lim.pool_heat_min > lim.pool_heat_max, "POOL_HEAT_MIN > POOL_HEAT_MAX"),
-            (lim.pool_heat_min + lim.min_spread > lim.pool_chill_max,
-             "POOL_HEAT_MIN + POOL_MIN_SPREAD > POOL_CHILL_MAX"),
-        ] if bad
-    ]
+    # negative spread would let chill drop below heat. (Saved settings, when there
+    # are any, replace these; they are checked by the same rules on save.)
+    problems = config_store.limit_problems(lim, {
+        "spa_min": "SPA_MIN", "spa_max": "SPA_MAX", "pool_heat_min": "POOL_HEAT_MIN",
+        "pool_heat_max": "POOL_HEAT_MAX", "pool_chill_max": "POOL_CHILL_MAX",
+        "min_spread": "POOL_MIN_SPREAD"})
     if problems:
         raise SystemExit("invalid limits: " + "; ".join(problems))
     return lim
@@ -80,8 +83,10 @@ def create_app(service: PoolService | None = None, owner: owner_auth.OwnerGate |
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        limits = None if service else limits_from_env()
         svc = service or PoolService(
-            make_backend(), limits_from_env(), float(os.environ.get("POLL_SECONDS", "15")),
+            make_backend(), limits, float(os.environ.get("POLL_SECONDS", "15")),
+            config=config_store.ConfigStore.from_env(limits),
             idle_seconds=float(os.environ.get("IDLE_SECONDS", "60")),
             cover_hint=os.environ.get("POOL_COVER_HINT", "1").strip().lower() not in ("0", "false", "no", "off"),
         )
@@ -95,8 +100,13 @@ def create_app(service: PoolService | None = None, owner: owner_auth.OwnerGate |
     async def call(coro):
         try:
             return await coro
+        except UnknownToggle as exc:
+            raise HTTPException(404, str(exc)) from exc
         except RuleError as exc:
             raise HTTPException(409, str(exc)) from exc
+        except SequenceError as exc:
+            # Already generic (which step stopped); the cause is in the log.
+            raise HTTPException(502, str(exc)) from exc
         except BackendError as exc:
             log.warning("controller error: %s", exc)
             raise HTTPException(502, f"Couldn't reach the pool: {exc}") from exc
@@ -144,6 +154,52 @@ def create_app(service: PoolService | None = None, owner: owner_auth.OwnerGate |
     @app.post("/api/pool/water_features")
     async def water_features(body: OnOff):
         return await call(svc().set_water_features(body.on))
+
+    @app.post("/api/toggle")
+    async def toggle(body: ToggleReq):
+        return await call(svc().set_toggle(body.id, body.on))
+
+    # ---- settings (GET is public: the page needs it to render) ---------------------
+
+    def no_store(response: Response) -> None:
+        response.headers["Cache-Control"] = "no-store"
+
+    @app.get("/api/config", dependencies=[Depends(no_store)])
+    async def get_config():
+        return config_store.public(svc().app_config())
+
+    @app.put("/api/config", dependencies=[Depends(gate.require_owner), Depends(no_store)])
+    async def put_config(request: Request, body: Any = Body(...)):
+        s = svc()
+        current = s.app_config()
+        version = body.get("version") if isinstance(body, dict) else None
+        if type(version) is not int:
+            raise HTTPException(422, "version: required (the version of the settings being edited)")
+        if version != current.version:
+            raise HTTPException(409, config_store.STALE_DETAIL)
+        try:
+            cfg = config_store.check_document(config_store.parse(body))
+            s.check_config_devices(cfg)
+        except config_store.ConfigInvalid as exc:
+            raise HTTPException(422, str(exc)) from exc
+        try:
+            saved = s.config.save(cfg, version)
+        except config_store.StaleVersion as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except config_store.StorageUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        log.info("settings saved (version %d) by owner from %s", saved.version, gate.client_id(request))
+        return config_store.public(saved)
+
+    @app.post("/api/config/reset", dependencies=[Depends(gate.require_owner), Depends(no_store)])
+    async def reset_config(request: Request):
+        s = svc()
+        try:
+            s.config.reset()
+        except config_store.StorageUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        log.info("settings reset to defaults by owner from %s", gate.client_id(request))
+        return config_store.public(s.app_config())
 
     @app.get("/sw.js")
     async def service_worker():
