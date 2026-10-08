@@ -23,6 +23,7 @@ from iaqualink.exception import AqualinkException, AqualinkServiceUnauthorizedEx
 from iaqualink.system import SystemStatus
 from iaqualink.systems.iaqua.device import IaquaColorLight, IaquaIclLight
 
+from .. import equipment
 from .base import BackendError, Snapshot, StaleData, Switch
 
 log = logging.getLogger(__name__)
@@ -74,6 +75,11 @@ class IAqualinkBackend:
         self._stale = False
         self._login_retry_at = 0.0
         self._login_backoff = 0.0
+        # Latest good get_home reply, flattened, for the read-only equipment view
+        # (iaqualink-py doesn't parse swc_info, cover_pool, firmware, ...).
+        self._home: dict | None = None
+        self._home_fw: str | None = None
+        self._home_status: str | None = None
 
     @classmethod
     def from_env(cls) -> IAqualinkBackend:
@@ -130,13 +136,16 @@ class IAqualinkBackend:
         way, so remember that the last refresh was incomplete.
         """
 
-        def wrap(name, is_bad):
+        def wrap(name, is_bad, on_good=None):
             orig = getattr(system, name)
 
             def parse(response):
                 try:
-                    if is_bad(response.json()):
+                    data = response.json()
+                    if is_bad(data):
                         self._stale = True
+                    elif on_good is not None:
+                        on_good(data)
                 except Exception:
                     self._stale = True
                 return orig(response)
@@ -151,7 +160,15 @@ class IAqualinkBackend:
 
         def home_bad(data):
             home = merged(data["home_screen"])
-            return home.get("status") != "Online" or home.get("system_type") in ("", None)
+            status = home.get("status")
+            self._home_status = status if isinstance(status, str) else None
+            return status != "Online" or home.get("system_type") in ("", None)
+
+        def home_good(data):
+            # Only a complete, Online reply replaces what the equipment view shows.
+            self._home = merged(data["home_screen"])
+            fw = data.get("attached_system_fw_version")
+            self._home_fw = fw if isinstance(fw, (str, int, float)) else None
 
         def devices_bad(data):
             screen = data["devices_screen"]
@@ -164,7 +181,7 @@ class IAqualinkBackend:
         def onetouch_bad(data):
             return merged(data["onetouch_screen"]).get("status") != "Online"
 
-        wrap("_parse_home_response", home_bad)
+        wrap("_parse_home_response", home_bad, home_good)
         wrap("_parse_devices_response", devices_bad)
         wrap("_parse_onetouch_response", onetouch_bad)
 
@@ -233,7 +250,9 @@ class IAqualinkBackend:
         self._stale = False
         await self._call(self.system.refresh)
         if self.system.status is not SystemStatus.ONLINE:
-            return Snapshot(connected=False)
+            # Only the panel's own status: the rest of the last reply may be old.
+            return Snapshot(connected=False, equipment=equipment.build(
+                None, status=self._home_status or "Offline", secrets=self._secrets()))
         if self._stale:
             raise StaleData("the controller sent an incomplete update")
 
@@ -289,7 +308,40 @@ class IAqualinkBackend:
             light_colors=self._colors(light),
             # Relay color lights pick a color by switching power on and off; ICL zones don't.
             light_cycles=isinstance(light, IaquaColorLight),
+            pool_covered=equipment.pool_covered(self._home),
+            equipment=self._equipment(),
         )
+
+    def _secrets(self) -> list[str]:
+        """Strings that must never show up in the equipment view."""
+        system_serial = getattr(self.system, "serial", None)
+        return [x for x in (self.serial, system_serial, self._username) if isinstance(x, str) and x]
+
+    def _equipment(self) -> dict:
+        """Read-only status rows from the last good refresh. Never sends anything."""
+        alert_dev = self.system.devices.get("heatpump_alert")
+
+        def on_labels(prefix: str) -> list[str]:
+            return [
+                str(d.data.get("label") or k)
+                for k, d in self.system.devices.items()
+                if k.startswith(prefix) and isinstance(d, (AqualinkSwitch, AqualinkLight)) and d.is_on
+            ]
+
+        try:
+            return equipment.build(
+                self._home,
+                status=self._home_status,
+                firmware=self._home_fw,
+                heatpump_alert=alert_dev.data.get("state") if alert_dev is not None else None,
+                aux_on=on_labels("aux_"),
+                scenes_on=on_labels("onetouch_") if any(
+                    k.startswith("onetouch_") for k in self.system.devices) else None,
+                secrets=self._secrets(),
+            )
+        except Exception as exc:  # the advanced view must never break guest state
+            log.warning("equipment view failed: %r", exc)
+            return {}
 
     async def set_switch(self, name: Switch, on: bool) -> None:
         dev = self._switch(name)

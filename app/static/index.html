@@ -119,8 +119,20 @@
           <span class="switch" aria-hidden="true"></span>
         </button>
         <p class="hint" id="wf-hint" hidden>Turn off Spillover to use Water Features</p>
+        <p class="hint cover-hint" id="cover-hint" hidden>The pool cover is closed — the panel blocks Spillover and Water Features while covered.</p>
       </div>
     </section>
+
+    <!-- Owner's read-only view of what the panel reports. Collapsed by default;
+         rendered by app.js from state.equipment on every poll. Sends nothing. -->
+    <details id="equip" class="card equip">
+      <summary class="equip-sum">
+        <span class="equip-title">Equipment status</span>
+        <span id="equip-flag" class="equip-flag" hidden></span>
+        <svg class="equip-chev" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+      </summary>
+      <div id="equip-body" class="equip-body"><p class="note">No status from the panel yet.</p></div>
+    </details>
   </main>
 
   <dialog id="color-sheet" class="sheet" aria-labelledby="color-h">

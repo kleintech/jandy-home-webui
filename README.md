@@ -8,7 +8,8 @@ the pool and spa without the iAqualink app or your account. They can:
 - set **temperatures**
 - toggle **Bubbles**, **Spillover** and **Water Features**
 
-It also shows the water and air temperature, an optional 6-hour **weather** forecast
+It also shows the water and air temperature, a collapsed, read-only **Equipment status**
+section for the owner, an optional 6-hour **weather** forecast
 with a one-line **"how's the swimming?"** rating, and can be added to a phone's home
 screen like an app.
 
@@ -142,6 +143,7 @@ Secret on Kubernetes.
 | `WEATHER_TZ` | `auto` | IANA timezone for forecast times. `auto` uses the location's timezone |
 | `POLL_SECONDS` | `15` | how often to poll iAqualink while someone has the page open |
 | `IDLE_SECONDS` | `60` | stop polling this long after the last page request |
+| `POOL_COVER_HINT` | `1` | `0` hides the "pool cover is closed" hint under Spillover / Water Features |
 | `PORT` | `8080` | listen port inside the container |
 | `LOG_LEVEL` | `INFO` | log verbosity |
 | `MOCK_LATENCY` | `0` | seconds of fake delay per command (mock only) |
@@ -168,6 +170,38 @@ data is fetched.
 
 The dot next to the title shows whether the server can reach your pool controller: green
 when it can, red when it can't.
+
+**Pool cover hint.** While the panel reports the pool cover as closed (`cover_pool` = `1`),
+a line under Spillover and Water Features says the panel blocks them while covered. It
+only informs: the toggles stay usable, because the `0` = uncovered reading hasn't been
+confirmed on a real panel yet. Turn it off with `POOL_COVER_HINT=0`.
+
+### Equipment status (advanced)
+
+A collapsed **Equipment status** card at the bottom of the page, meant for the owner.
+It is **read-only**: it shows what the panel reported on the last refresh (the same
+`get_home`, `get_devices` and `get_onetouch` calls the page already makes) and never
+sends a command. It refreshes with the regular panel poll (every `POLL_SECONDS` while someone has the page open); while the panel's last reply was incomplete, the previous rows stay up. A field the panel
+leaves blank is left out. Rows that look abnormal get an amber background, and the
+collapsed header shows how many there are ("2 alerts").
+
+| Group | Rows |
+|---|---|
+| Pool cover | Closed (covered) / Open (uncovered), from `cover_pool` |
+| Pumps & heat | Filter pump, Spa mode, Spa heater, Pool heater, Solar heater (Off / Heating / On, idle), Heat pump (Off / On, idle / Running), Heat pump mode, Heat pump alert (amber) |
+| Salt cell | Status (Standby, Running, Boosting, Boost paused; anything else is shown as reported and flagged as a possible fault), output % |
+| Water chemistry | Pool/spa salinity, pH, ORP, only if the panel reports them |
+| Aux circuits & scenes | Which aux circuits and OneTouch scenes are on |
+| Panel | Controller (Online; Offline, Service or Not reachable in amber), model (decoded from the panel's reply when possible), firmware, freeze protection (Active in amber), temperature units, relays, last update |
+
+When the panel itself reports Offline or Service, only the Controller row is shown,
+because the other readings may be out of date. When the server can't reach iAqualink at
+all, the last good rows stay, with Controller showing "Not reachable" and Last update
+showing their age. The view never includes serials, account details or session IDs.
+
+In `/api/state` this is `"equipment": {"groups": [{"id", "title", "note", "rows": [{"id",
+"label", "value", "warn"}]}]}`. Group and row ids are stable; see `app/equipment.py`.
+`pool.covered` (true, false or null) and `pool.cover_hint` drive the cover hint.
 
 ## Safety, and how it talks to the Jandy
 
@@ -291,6 +325,7 @@ Where things are:
 - `app/service.py`: the house rules.
 - `app/backends/iaqualink.py`: maps the house rules onto iaqualink-py.
 - `app/backends/mock.py`: the pretend pool.
+- `app/equipment.py`: the read-only Equipment status rows.
 - `app/weather.py`: the forecast.
 - `app/comfort.py`: the swim rating (bands and rules documented in the module).
 - `app/discover.py`: the read-only device lister.

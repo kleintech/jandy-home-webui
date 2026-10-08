@@ -64,6 +64,9 @@
     spillHint: $('spill-hint'),
     wf: $('t-wf'),
     wfHint: $('wf-hint'),
+    coverHint: $('cover-hint'),
+    equipFlag: $('equip-flag'),
+    equipBody: $('equip-body'),
     toast: $('toast'),
   };
 
@@ -646,6 +649,77 @@
     el.poolMax.textContent = hi + '°';
   }
 
+  // ---------- equipment status (read-only, owner's advanced section) ----------
+  // Rows come from state.equipment.groups; this only draws them (textContent,
+  // never HTML: labels come from the panel). Redrawn only when something changed.
+  function updatedText(iso) {
+    const d = iso ? new Date(iso) : null;
+    if (!d || isNaN(d)) return null;
+    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    return d.toDateString() === new Date().toDateString()
+      ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+  }
+
+  let renderedEquip = '';
+  function renderEquipment() {
+    const eq = state && state.equipment;
+    // Drop malformed groups/rows up front: one bad row must not take the card down.
+    const groups = eq && Array.isArray(eq.groups)
+      ? eq.groups.filter((g) => g && Array.isArray(g.rows))
+        .map((g) => ({ ...g, rows: g.rows.filter((r) => r && typeof r === 'object') }))
+      : [];
+    const updated = updatedText(state && state.updated_at);
+    const sig = JSON.stringify([groups, updated]);
+    if (sig === renderedEquip) return;
+    renderedEquip = sig;
+
+    let warnings = 0;
+    const frag = document.createDocumentFragment();
+    const panelRows = (g) => (g.id === 'panel' && updated
+      ? [...g.rows, { id: 'updated_at', label: 'Last update', value: updated, warn: false }] : g.rows);
+    const list = groups.length || !updated ? groups
+      : [{ id: 'panel', title: 'Panel', note: null, rows: [] }];
+    for (const g of list) {
+      const sec = document.createElement('section');
+      sec.className = 'eq-group';
+      const h = document.createElement('h3');
+      h.className = 'eq-head';
+      h.textContent = String(g.title || '');
+      const dl = document.createElement('dl');
+      dl.className = 'eq-rows';
+      for (const r of panelRows(g)) {
+        const row = document.createElement('div');
+        const warn = r.warn === true;
+        row.className = 'eq-row' + (warn ? ' warn' : '');
+        if (warn) warnings += 1;
+        const dt = document.createElement('dt');
+        dt.textContent = String(r.label ?? '');
+        const dd = document.createElement('dd');
+        dd.textContent = String(r.value ?? '');
+        row.append(dt, dd);
+        dl.append(row);
+      }
+      sec.append(h, dl);
+      if (g.note) {
+        const n = document.createElement('p');
+        n.className = 'note eq-note';
+        n.textContent = String(g.note);
+        sec.append(n);
+      }
+      frag.append(sec);
+    }
+    el.equipBody.textContent = '';
+    if (list.length) el.equipBody.append(frag);
+    else {
+      const p = document.createElement('p');
+      p.className = 'note';
+      p.textContent = 'No status from the panel yet.';
+      el.equipBody.append(p);
+    }
+    el.equipFlag.hidden = warnings === 0;
+    el.equipFlag.textContent = warnings === 1 ? '1 alert' : `${warnings} alerts`;
+  }
+
   function render() {
     // A drag interrupted by the controls being disabled can't finish; drop it so its
     // local values don't mask the server's forever.
@@ -663,6 +737,7 @@
       return;
     }
     el.body.classList.remove('loading');
+    renderEquipment();
 
     const connected = controlsEnabled();
     const mode = view('mode') === 'spa' ? 'spa' : 'pool';
@@ -747,6 +822,9 @@
       el.spill.hidden = !spillAvail;
       el.spillHint.hidden = !wf || !spillAvail;
       el.wfHint.hidden = !spill;
+      // Informational only: the cover_pool 1/0 mapping isn't confirmed, so the
+      // toggles stay usable and the panel has the final say.
+      el.coverHint.hidden = !(pool.cover_hint === true && pool.covered === true);
     }
   }
 

@@ -81,6 +81,7 @@ def create_app(service: PoolService | None = None) -> FastAPI:
         svc = service or PoolService(
             make_backend(), limits_from_env(), float(os.environ.get("POLL_SECONDS", "15")),
             idle_seconds=float(os.environ.get("IDLE_SECONDS", "60")),
+            cover_hint=os.environ.get("POOL_COVER_HINT", "1").strip().lower() not in ("0", "false", "no", "off"),
         )
         app.state.svc = svc
         await svc.start()
