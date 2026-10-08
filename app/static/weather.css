@@ -185,3 +185,25 @@
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+/* 6-hour chart disclosure (closed by default). */
+.wx-more { margin-top: 10px; border-top: 1px solid var(--border); }
+.wx-more-sum {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 600;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.wx-more-sum::-webkit-details-marker { display: none; }
+.wx-more-sum:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.wx-more-chev { display: flex; flex: none; transition: transform .2s; }
+.wx-more[open] .wx-more-chev { transform: rotate(180deg); }
+.wx-more[open] .wx-more-sum { color: var(--text); }
