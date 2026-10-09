@@ -20,6 +20,16 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+        # The image runs as uid 1000. fsGroup makes the settings volume group-owned
+        # by 1000 (group-writable) on provisioners that support it. hostPath-based
+        # ones like k3s local-path ignore fsGroup; there /data is writable only
+        # because local-path creates its directories mode 0777.
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      volumes:
+        - name: config-data
+          persistentVolumeClaim:
+            claimName: pool-config-data
       containers:
         - name: pool
           # Tag is set in kustomization.yaml.
@@ -41,6 +51,10 @@ spec:
             - secretRef:
                 name: iaqualink-credentials
                 optional: true
+          # The root filesystem is read-only; saved settings live here.
+          volumeMounts:
+            - name: config-data
+              mountPath: /data
           readinessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 10

@@ -27,6 +27,24 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value: {name: JANDY_BACKEND, value: mock}
+  # Dev keeps saved settings in an emptyDir instead of a PVC: they last until the pod
+  # is replaced, and nothing is left behind in the dev namespace. Prod keeps them on
+  # the pool-config-data PVC.
+  - target: {kind: Deployment, name: pool}
+    patch: |
+      - op: test
+        path: /spec/template/spec/volumes/0/name
+        value: config-data
+      - op: replace
+        path: /spec/template/spec/volumes/0
+        value: {name: config-data, emptyDir: {sizeLimit: 64Mi}}
+  - target: {kind: PersistentVolumeClaim, name: pool-config-data}
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: pool-config-data
   - target: {kind: Ingress, name: pool}
     patch: |
       - op: replace

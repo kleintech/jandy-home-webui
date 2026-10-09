@@ -1,0 +1,19 @@
+# Saved owner settings (/data/config.json; see "Settings" in README.md). Tiny, one
+# writer: ReadWriteOnce, which is why the Deployment uses strategy Recreate (the old
+# pod must let go of the volume before the new one mounts it). No storageClassName:
+# the cluster default (k3s: local-path) is used.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pool-config-data
+  labels:
+    app.kubernetes.io/name: pool
+  annotations:
+    # The owner's saved settings: Argo CD must never prune or delete this, even if
+    # it disappears from the manifests or the Application is deleted.
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi

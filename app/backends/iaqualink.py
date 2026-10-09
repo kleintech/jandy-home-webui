@@ -16,13 +16,25 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from typing import get_args
 
 from iaqualink.client import AqualinkClient
 from iaqualink.device import AqualinkLight, AqualinkNumber, AqualinkSensor, AqualinkSwitch
 from iaqualink.exception import AqualinkException, AqualinkServiceUnauthorizedException
 from iaqualink.system import SystemStatus
-from iaqualink.systems.iaqua.device import IaquaColorLight, IaquaIclLight
+from iaqualink.systems.iaqua.device import (
+    IaquaColorLight,
+    IaquaDimmableLight,
+    IaquaHeater,
+    IaquaHeatPump,
+    IaquaHeatPumpMode,
+    IaquaIclLight,
+    IaquaOneTouchSwitch,
+    IaquaSwitch,
+    IaquaVSPump,
+)
 
+from .. import advanced as adv
 from .. import equipment
 from .base import BackendError, Snapshot, StaleData, Switch
 
@@ -75,6 +87,8 @@ class IAqualinkBackend:
         self._stale = False
         self._login_retry_at = 0.0
         self._login_backoff = 0.0
+        # Last effect set per color light key (aux color lights can't report theirs).
+        self._adv_effects: dict[str, str] = {}
         # Latest good get_home reply, flattened, for the read-only equipment view
         # (iaqualink-py doesn't parse swc_info, cover_pool, firmware, ...).
         self._home: dict | None = None
@@ -310,6 +324,7 @@ class IAqualinkBackend:
             light_cycles=isinstance(light, IaquaColorLight),
             pool_covered=equipment.pool_covered(self._home),
             equipment=self._equipment(),
+            advanced=self._advanced(),
         )
 
     def _secrets(self) -> list[str]:
@@ -363,6 +378,7 @@ class IAqualinkBackend:
             await self._call(light.turn_on)
         await self._call(lambda: light.set_effect(effect))
         self._light_effect = color
+        self._adv_effects[light.name] = effect
 
     async def set_spa_setpoint(self, temp: int) -> None:
         dev = self.system.devices.get("spa_set_point") if self.system else None
@@ -398,3 +414,223 @@ class IAqualinkBackend:
         else:
             await write_chill()
             await write_heat()
+
+    # ---- owner "Advanced" controls -------------------------------------------------
+    # Every write maps an allowlisted device key to the library's device object and
+    # calls its own method (turn_on/turn_off check the cached state, which the service
+    # refreshed just before). No command string is ever built from a request.
+
+    def switch_keys(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        if self.system is None:
+            return out
+        for name in get_args(Switch):
+            dev = self._light() if name == "light" else self._find(getattr(self.map, name))
+            if dev is not None:
+                out[name] = dev.name
+        return out
+
+    def _adv_kind(self, key: str, dev) -> str | None:
+        """Which owner switch kind a device is, or None if it isn't one we expose."""
+        if isinstance(dev, IaquaHeatPump):
+            return "heatpump"
+        if isinstance(dev, IaquaVSPump):
+            return "vsp"
+        if isinstance(dev, IaquaIclLight):
+            return "light"
+        if isinstance(dev, IaquaOneTouchSwitch):
+            return "scene"
+        if key.startswith("aux_") and isinstance(dev, AqualinkLight):
+            return "light"
+        if key.startswith("aux_") and isinstance(dev, AqualinkSwitch):
+            return "aux"
+        if isinstance(dev, IaquaHeater) and key in adv.HOME_LABELS:
+            # The panel reports "" for equipment it doesn't have (solar on this panel).
+            if key == "solar_heater" and not str(dev.data.get("state") or "").strip():
+                return None
+            return "heater"
+        if isinstance(dev, IaquaSwitch) and key in adv.HOME_LABELS:
+            return "pump"
+        return None
+
+    def _adv_devices(self) -> dict:
+        """key -> library device, for every device an owner may switch. This is the
+        allowlist every advanced write is checked against."""
+        if self.system is None:
+            return {}
+        return {k: d for k, d in self.system.devices.items() if self._adv_kind(k, d)}
+
+    def _adv_device(self, key: str, *types):
+        dev = self._adv_devices().get(key)
+        if dev is None or (types and not isinstance(dev, types)):
+            raise BackendError("the controller has no such device")
+        return dev
+
+    def _advanced(self) -> dict:
+        try:
+            return self._advanced_view()
+        except Exception as exc:  # never break the guest snapshot over the owner view
+            log.warning("advanced view failed: %r", exc)
+            return {}
+
+    def _advanced_view(self) -> dict:
+        secrets = self._secrets()
+        roles: dict[str, str] = {}
+        for name, key in self.switch_keys().items():
+            roles.setdefault(key, name)
+        devices: dict[str, dict] = {}
+        lights: list[dict] = []
+        vsp: list[dict] = []
+        for key, dev in self._adv_devices().items():
+            kind = self._adv_kind(key, dev)
+            if key in adv.HOME_LABELS:
+                raw_label = adv.HOME_LABELS[key]
+            elif isinstance(dev, IaquaIclLight):
+                raw_label = dev.label
+            else:
+                raw_label = dev.data.get("label")
+            label = adv.clean_label(raw_label, key, secrets)
+            on = bool(getattr(dev, "is_on", False))
+            devices[key] = adv.device_entry(key, label, kind, on, roles.get(key))
+            if kind == "light":
+                lights.append(self._light_entry(key, dev, on))
+            elif kind == "vsp":
+                presets, preset = [], None
+                if dev.supports_presets:
+                    presets = [str(p) for p in dev.preset_modes]
+                    preset = dev.preset_mode
+                vsp.append({"key": key, "presets": presets, "preset": preset})
+
+        hp = self.system.devices.get("heatpump")
+        heatpump = None
+        if isinstance(hp, IaquaHeatPump):
+            mode_dev = self.system.devices.get("heatpump_mode")
+            heatpump = {
+                "status": adv.text(hp.data.get("state")) or None,
+                "type": adv.text(hp.data.get("hpm_type")) or None,
+                "mode": mode_dev.current_option if isinstance(mode_dev, IaquaHeatPumpMode) else None,
+                "modes": [str(o) for o in mode_dev.options] if isinstance(mode_dev, IaquaHeatPumpMode) else [],
+            }
+
+        def rng(key: str) -> dict | None:
+            dev = self.system.devices.get(key)
+            if not isinstance(dev, AqualinkNumber):
+                return None
+            try:
+                return {"min": int(dev.min_value), "max": int(dev.max_value)}
+            except Exception:
+                return None  # temperature unit not known yet: no writes
+
+        swc = (self._home or {}).get("swc_info")
+        swc = swc if isinstance(swc, dict) else {}
+        out = swc.get("swcPoolValue")
+        return {
+            "devices": devices,
+            "heatpump": heatpump,
+            "setpoint_ranges": {
+                "spa": rng("spa_set_point"),
+                "pool_heat": rng("pool_set_point"),
+                "pool_chill": rng("pool_chill_set_point"),
+            },
+            "lights": lights,
+            # Only pumps the library discovered (system.is_vsp); none means none shown.
+            "vsp": vsp,
+            "salt": {
+                "present": swc.get("isswcPresent") is True,
+                "status": adv.text(swc.get("swcPoolStatus")) or None,
+                "output": out if isinstance(out, (int, float)) and not isinstance(out, bool) else None,
+            },
+        }
+
+    def _light_entry(self, key: str, dev, on: bool) -> dict:
+        if isinstance(dev, IaquaIclLight):
+            ltype, step = "icl", 5
+            effect = dev.effect if on else None
+        elif isinstance(dev, IaquaColorLight):
+            ltype, step = "color", None
+            effect = self._adv_effects.get(key) if on else None
+        elif isinstance(dev, IaquaDimmableLight):
+            ltype, step, effect = "dimmable", 25, None
+        else:
+            ltype, step, effect = "switch", None, None
+        if not on:
+            self._adv_effects.pop(key, None)
+        effects: list[str] = []
+        if ltype in ("icl", "color"):
+            effects = [e for e in (dev.effect_list or []) if e != "Off"]
+        brightness = None
+        if step is not None:
+            try:
+                brightness = dev.brightness_percentage
+            except (TypeError, ValueError, KeyError):
+                brightness = None
+        return {"key": key, "type": ltype, "effects": effects, "effect": effect,
+                "brightness": brightness, "brightness_step": step}
+
+    async def adv_set_switch(self, key: str, on: bool) -> None:
+        dev = self._adv_device(key)
+        await self._call(dev.turn_on if on else dev.turn_off)
+        if not on:
+            self._adv_effects.pop(key, None)
+
+    async def adv_set_heatpump_mode(self, mode: str) -> None:
+        dev = self.system.devices.get("heatpump_mode") if self.system else None
+        if not isinstance(dev, IaquaHeatPumpMode) or mode not in dev.options:
+            raise BackendError("the heat pump has no such mode")
+        if dev.current_option == mode:
+            return
+        await self._call(lambda: dev.select_option(mode))
+
+    async def adv_set_light_effect(self, key: str, effect: str) -> None:
+        dev = self._adv_device(key, IaquaIclLight, IaquaColorLight)
+        if effect == "Off" or effect not in (dev.effect_list or []):
+            raise BackendError("that light has no such effect")
+        if isinstance(dev, IaquaIclLight) and not dev.is_on:
+            # An ICL zone has a separate on/off command; a color alone may not light it.
+            await self._call(dev.turn_on)
+        await self._call(lambda: dev.set_effect(effect))
+        self._adv_effects[key] = effect
+
+    async def adv_set_light_brightness(self, key: str, brightness: int) -> None:
+        dev = self._adv_device(key, IaquaIclLight, IaquaDimmableLight)
+        await self._call(lambda: dev.set_brightness_percentage(brightness))
+
+    async def adv_set_vsp_preset(self, key: str, preset: str) -> None:
+        dev = self._adv_device(key, IaquaVSPump)
+        if not dev.supports_presets or preset not in dev.preset_modes:
+            raise BackendError("that pump has no such speed")
+        await self._call(lambda: dev.set_preset_mode(preset))
+
+    # Salt cell (AquaPure / SWC). iaqualink-py has no support for these; the commands
+    # and parameters come from the iAqualink protocol reference
+    # (iaqualink-py docs/reference/systems/iaqua.md, "SWC"), sent through the
+    # library's session request like every other iaqua command. DOCUMENTED BUT NOT
+    # VERIFIED on this panel: the library notes that SWC endpoints may live on the v1
+    # r-api host instead; if the panel rejects them, the owner sees a generic error
+    # and nothing else changes.
+
+    async def _swc(self, command: str, params: dict | None = None) -> dict:
+        if command not in (adv.SWC_GET, adv.SWC_SET, adv.SWC_BOOST):
+            raise BackendError("unsupported salt cell command")
+
+        async def go():
+            r = await self.system._send_session_request(command, params)
+            return r.json()
+
+        data = await self._call(go)
+        try:
+            return adv.parse_swc_config(data)
+        except ValueError as exc:
+            log.warning("salt cell %s refused or unreadable: %s", command, exc)
+            raise BackendError("the salt cell didn't accept that") from exc
+
+    async def salt_config(self) -> dict:
+        return await self._swc(adv.SWC_GET)
+
+    async def set_salt(self, pool_pct: int, spa_pct: int) -> dict:
+        adv.check_salt_pct(pool_pct)
+        adv.check_salt_pct(spa_pct)
+        return await self._swc(adv.SWC_SET, {"poolswcsp": str(pool_pct), "spaswcsp": str(spa_pct)})
+
+    async def salt_boost(self, action: str, hours: int | None, mode: str | None) -> dict:
+        return await self._swc(adv.SWC_BOOST, adv.boost_params(action, hours, mode))

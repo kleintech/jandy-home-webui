@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
 from .backends.base import Backend, BackendError, Snapshot, StaleData, Switch
+from .config_store import AppConfig, ConfigInvalid, ConfigStore, LightStep, Limits, SpaMaxStep
+
+__all__ = ["Limits", "PoolService", "RuleError", "SequenceError", "UnknownToggle"]
 
 log = logging.getLogger(__name__)
 
@@ -30,27 +34,56 @@ STALE_RETRY_SECONDS = 2.0
 IDLE_SECONDS = 60.0
 
 
-@dataclass(frozen=True)
-class Limits:
-    spa_min: int = 80
-    spa_max: int = 103
-    # Heat is the LOW pool set point (heat below it), chill the HIGH one (cool above it),
-    # and chill must stay at least min_spread above heat.
-    pool_heat_min: int = 82
-    pool_heat_max: int = 92
-    pool_chill_max: int = 92
-    min_spread: int = 5
-
-
 class RuleError(Exception):
     """A request the house rules don't allow (maps to HTTP 409/422)."""
+
+
+class UnknownToggle(RuleError):
+    """No guest toggle with that id (HTTP 404)."""
+
+
+class SequenceError(BackendError):
+    """A Hot Tub On/Off step failed at the controller; the message (generic, safe
+    for guests) says which step, and the steps after it were not run."""
+
+
+# Which device kinds each kind of configured step / guest toggle may drive.
+FITS = {
+    "switch": frozenset({"pump", "heater", "heatpump", "aux", "vsp"}),
+    "scene": frozenset({"scene"}),
+    "light": frozenset({"light"}),
+    "toggle": frozenset({"aux", "light", "scene"}),
+}
+# When the panel's device list isn't known (controller unreachable), keys are checked
+# against the shapes the backends produce instead; a run re-checks the real panel.
+KNOWN_KEYS = {
+    "switch": re.compile(r"(pool_pump|spa_pump|spa_heater|pool_heater|solar_heater|heatpump|aux_[A-Za-z0-9]{1,3})"),
+    "scene": re.compile(r"onetouch_\d{1,2}"),
+    "light": re.compile(r"aux_[A-Za-z0-9]{1,3}|icl_zone_\d{1,2}"),
+    "toggle": re.compile(r"aux_[A-Za-z0-9]{1,3}|icl_zone_\d{1,2}|onetouch_\d{1,2}"),
+}
+SEQUENCE_NAMES = {"hot_tub_on": "Hot Tub On", "hot_tub_off": "Hot Tub Off"}
+# Guest switches a guest toggle may never drive, whatever device the env map gives
+# them: pumps and heaters are the owner's (Hot Tub On/Off runs them in a safe order).
+PROTECTED_ROLES = ("filter_pump", "spa_mode", "spa_heater", "pool_heater")
+ROLE_LABELS = {
+    "filter_pump": "Filter pump", "spa_mode": "Spa mode", "spa_heater": "Spa heater",
+    "pool_heater": "Pool heater", "bubbles": "Bubbles", "spillover": "Spillover",
+    "water_features": "Water Features", "light": "The light",
+}
+SCENE_KEY = re.compile(r"onetouch_\d{1,2}")
+SCENE_TOGGLE_WARNING = "OneTouch scenes can switch pumps and heaters; guests will be able to run it"
 
 
 class PoolService:
     def __init__(self, backend: Backend, limits: Limits | None = None, poll_seconds: float = 15,
                  settle_seconds: float = SETTLE_SECONDS, stale_retry_seconds: float = STALE_RETRY_SECONDS,
-                 idle_seconds: float = IDLE_SECONDS, cover_hint: bool = True) -> None:
+                 idle_seconds: float = IDLE_SECONDS, cover_hint: bool = True,
+                 config: ConfigStore | None = None) -> None:
         self.backend = backend
+        # Live settings (limits, Hot Tub sequences, guest toggles, weather). Without a
+        # store: defaults from `limits`, kept in memory.
+        self.config = config or ConfigStore(None, limits or Limits())
         # Show "the pool cover is closed" under Spillover / Water Features.
         self.cover_hint = cover_hint
         self.idle_seconds = idle_seconds
@@ -61,7 +94,13 @@ class PoolService:
         self.settle_seconds = settle_seconds
         self.stale_retry_seconds = stale_retry_seconds
         self._commanded: dict[str, tuple[bool, float]] = {}
-        self.limits = limits or Limits()
+        # The same, by device key (owner Advanced controls). Guest and owner commands
+        # are recorded in both, so neither can toggle what the other just switched.
+        self._dev_commanded: dict[str, tuple[bool, float]] = {}
+        # Set points we wrote (spa_set / pool_heat_set / pool_chill_set), trusted the
+        # same way: a lagging cloud must not make the next request validate the
+        # chill/heat spread against the value from before our write.
+        self._sp_commanded: dict[str, tuple[int, float]] = {}
         self.poll_seconds = poll_seconds
         self.snap = Snapshot()
         self.updated_at: datetime | None = None
@@ -142,12 +181,216 @@ class PoolService:
                 del self._commanded[name]  # settled, or the controller caught up
             else:
                 changes[attr] = on
-        return replace(snap, **changes) if changes else snap
+        for attr, (value, at) in list(self._sp_commanded.items()):
+            if now - at > self.settle_seconds or getattr(snap, attr) == value:
+                del self._sp_commanded[attr]
+            elif getattr(snap, attr) is not None:
+                changes[attr] = value
+        snap = replace(snap, **changes) if changes else snap
+        return self._overlay_devices(snap)
+
+    def _overlay_devices(self, snap: Snapshot) -> Snapshot:
+        devices = (snap.advanced or {}).get("devices")
+        if not self._dev_commanded or not devices:
+            return snap
+        now = time.monotonic()
+        out = dict(devices)
+        for key, (on, at) in list(self._dev_commanded.items()):
+            cur = devices.get(key)
+            if now - at > self.settle_seconds or (cur is not None and cur.get("on") == on):
+                del self._dev_commanded[key]
+            elif cur is not None:
+                out[key] = {**cur, "on": on}
+        snap.advanced = {**snap.advanced, "devices": out}
+        return snap
+
+    def _switch_keys(self) -> dict[str, str]:
+        try:
+            return dict(self.backend.switch_keys())
+        except Exception as exc:
+            log.warning("switch key lookup failed: %r", exc)
+            return {}
+
+    def _pending_device(self, key: str) -> bool | None:
+        """What we last commanded this device to, while the cloud hasn't caught up."""
+        entry = self._dev_commanded.get(key)
+        if entry and time.monotonic() - entry[1] <= self.settle_seconds:
+            return entry[0]
+        return None
+
+    def _set_device_on(self, key: str, on: bool, now: float) -> None:
+        self._dev_commanded[key] = (on, now)
+        devices = (self.snap.advanced or {}).get("devices")
+        if devices and key in devices:
+            self.snap.advanced = {**self.snap.advanced,
+                                  "devices": {**devices, key: {**devices[key], "on": on}}}
+
+    def _note_device(self, key: str, on: bool) -> None:
+        """Record an owner command on a device, and on any guest switch it drives."""
+        now = time.monotonic()
+        self._set_device_on(key, on, now)
+        for name, k in self._switch_keys().items():
+            if k == key:
+                self._commanded[name] = (on, now)
+                setattr(self.snap, "light_on" if name == "light" else name, on)
+
+    def _note_setpoints(self, **values: int | None) -> None:
+        """Record set points we just wrote (spa_set=, pool_heat_set=, pool_chill_set=)."""
+        now = time.monotonic()
+        for attr, value in values.items():
+            if value is not None:
+                self._sp_commanded[attr] = (value, now)
+                setattr(self.snap, attr, value)
+
+    def _pending_guest(self, name: str) -> bool | None:
+        """What we last commanded a guest switch to, while the cloud hasn't caught up."""
+        entry = self._commanded.get(name)
+        if entry and time.monotonic() - entry[1] <= self.settle_seconds:
+            return entry[0]
+        return None
+
+    def _note_guest(self, name: str, on: bool) -> None:
+        """Record a guest command, also against the device key it drives."""
+        now = time.monotonic()
+        self._commanded[name] = (on, now)
+        key = self._switch_keys().get(name)
+        if key:
+            self._set_device_on(key, on, now)
+
+    # ---- configuration -------------------------------------------------------------
+
+    def app_config(self) -> AppConfig:
+        """The live settings document (saved, or today's defaults)."""
+        return self.config.current(self._switch_keys())
+
+    @property
+    def limits(self) -> Limits:
+        return self.app_config().limits.to_limits()
+
+    def _devices(self) -> dict[str, dict[str, Any]]:
+        return (self.snap.advanced or {}).get("devices") or {}
+
+    def _role_of(self, key: str, keys: dict[str, str] | None = None) -> str | None:
+        """The guest switch (filter_pump, bubbles, ...) a device key drives, if any."""
+        for name, k in (keys if keys is not None else self._switch_keys()).items():
+            if k == key:
+                return name
+        return None
+
+    def _key_known(self, key: str) -> bool:
+        return key in self._devices() or self._role_of(key) is not None
+
+    def _key_on(self, key: str) -> bool:
+        role = self._role_of(key)
+        if role is not None:
+            return bool(getattr(self.snap, "light_on" if role == "light" else role))
+        return bool(self._devices().get(key, {}).get("on"))
+
+    def check_config_devices(self, cfg: AppConfig) -> None:
+        """Every key in the document must be a device the panel reports and of a kind
+        that fits its use. While the device list isn't known (controller
+        unreachable), keys are checked against the shapes backends produce; a run
+        re-checks against the panel. Raises ConfigInvalid naming the field."""
+        devices = self._devices() if self.snap.connected else {}
+        keys = self._switch_keys()
+        # The devices the env device map gives each use (any kind: that is how the
+        # defaults drive them). Toggles only get the old guest toggles' devices, so a
+        # remapped heater can't be offered to guests this way.
+        role_keys = {
+            "switch": {k for n, k in keys.items() if n != "light"},
+            "toggle": {k for n, k in keys.items() if n in ("bubbles", "spillover", "water_features")},
+        }
+        lights = {x.get("key"): x for x in (self.snap.advanced or {}).get("lights") or []}
+
+        protected = self._protected_keys(keys)
+
+        def check(where: str, key: str, use: str) -> None:
+            if use == "toggle" and key in protected:
+                raise ConfigInvalid(f"{where}.key: {key} runs the {ROLE_LABELS[protected[key]].lower()}; "
+                                    "guests can't switch it")
+            if key in role_keys.get(use, ()):
+                return
+            if devices:
+                d = devices.get(key)
+                if d is None:
+                    raise ConfigInvalid(f"{where}.key: the controller has no device {key!r}")
+                if d["kind"] not in FITS[use]:
+                    raise ConfigInvalid(f"{where}.key: {d['label']} ({key}) can't be used as a {use}")
+            elif not KNOWN_KEYS[use].fullmatch(key):
+                raise ConfigInvalid(f"{where}.key: {key!r} isn't a known {use} device")
+
+        for seq in ("hot_tub_on", "hot_tub_off"):
+            for i, st in enumerate(getattr(cfg, seq)):
+                if isinstance(st, SpaMaxStep):
+                    continue
+                where = f"{seq}.{i}"
+                check(where, st.key, st.action)
+                if isinstance(st, LightStep) and st.effect is not None and devices:
+                    entry = lights.get(st.key) or {}
+                    guest_color = keys.get("light") == st.key and st.effect in self.snap.light_colors
+                    if st.effect not in (entry.get("effects") or []) and not guest_color:
+                        raise ConfigInvalid(f"{where}.effect: that light has no effect {st.effect!r}")
+        for i, t in enumerate(cfg.guest_toggles):
+            check(f"guest_toggles.{i}", t.key, "toggle")
+
+    @staticmethod
+    def _protected_keys(keys: dict[str, str]) -> dict[str, str]:
+        """Device key -> the pump/heater role it has (never a guest toggle)."""
+        return {k: n for n, k in keys.items() if n in PROTECTED_ROLES}
+
+    def toggle_warnings(self, cfg: AppConfig) -> list[str]:
+        """Things the owner should know about a document that is otherwise fine."""
+        devices = self._devices()
+        out = []
+        for t in cfg.guest_toggles:
+            d = devices.get(t.key)
+            if (d is not None and d.get("kind") == "scene") or SCENE_KEY.fullmatch(t.key):
+                out.append(f"{t.label}: {SCENE_TOGGLE_WARNING}")
+        return out
+
+    def _step_problem(self, st) -> str | None:
+        """Why a Hot Tub step can't run against the current (fresh) snapshot: the
+        device is gone, is the wrong kind for the step, or the light has no such
+        effect. None when it can run."""
+        if isinstance(st, SpaMaxStep):
+            return None
+        keys = self._switch_keys()
+        role = self._role_of(st.key, keys)
+        d = self._devices().get(st.key)
+        if d is None:
+            if role is None:
+                return "the controller doesn't report that device"
+        elif d["kind"] not in FITS[st.action] and not (
+                st.action == "switch" and role is not None and role != "light"):
+            return f"{d['label']} can't be used as a {st.action}"
+        if isinstance(st, LightStep) and st.on and st.effect is not None:
+            if not (role == "light" and st.effect in self.snap.light_colors):
+                entry = next((x for x in (self.snap.advanced or {}).get("lights") or []
+                              if x.get("key") == st.key), None)
+                if entry is None or st.effect not in (entry.get("effects") or []):
+                    return f"that light has no effect {st.effect!r}"
+        return None
+
+    def toggles_state(self, cfg: AppConfig) -> list[dict[str, Any]]:
+        out = []
+        for t in cfg.guest_toggles:
+            blocker = next((o for o in (cfg.toggle(c) for c in t.conflicts)
+                            if o is not None and self._key_on(o.key)), None)
+            out.append({
+                "id": t.id,
+                "label": t.label,
+                "on": self._key_on(t.key),
+                "modes": list(t.modes),
+                "available": self._key_known(t.key),
+                "blocked_by": blocker.label if blocker else None,
+            })
+        return out
 
     # ---- state ---------------------------------------------------------------------
 
     def state(self) -> dict[str, Any]:
-        s, lim = self.snap, self.limits
+        cfg = self.app_config()
+        s, lim = self.snap, cfg.limits.to_limits()
         chill_supported = s.pool_chill_set is not None
         return {
             "connected": s.connected,
@@ -193,6 +436,11 @@ class PoolService:
                 "covered": s.pool_covered,
                 "cover_hint": self.cover_hint and s.pool_covered is True,
             },
+            # Guest toggles from the settings (the fixed spa.bubbles / pool.spillover /
+            # pool.water_features fields above stay for one release).
+            "toggles": self.toggles_state(cfg),
+            # The page refetches /api/config when this changes.
+            "config_version": cfg.version,
             "equipment": self._equipment(),
         }
 
@@ -221,11 +469,20 @@ class PoolService:
     # ---- commands ------------------------------------------------------------------
 
     async def _ensure(self, name: Switch, on: bool) -> None:
-        """Set a switch only if it isn't already there (Jandy commands are toggles)."""
+        """Set a switch only if it isn't already there (Jandy commands are toggles).
+        While an earlier command is still settling, the same request is a no-op and
+        the reverse is refused: the cloud (and the library's cache, which decides
+        whether turn_on/turn_off sends anything) still shows the old state, so the
+        reverse would be silently dropped."""
+        pending = self._pending_guest(name)
+        if pending is not None:
+            if pending == on:
+                return
+            raise RuleError(f"{ROLE_LABELS.get(name, name)} is still changing; try again in a few seconds")
         current = getattr(self.snap, "light_on" if name == "light" else name)
         if current != on:
             await self.backend.set_switch(name, on)
-            self._commanded[name] = (on, time.monotonic())
+            self._note_guest(name, on)
             setattr(self.snap, "light_on" if name == "light" else name, on)
 
     async def _run(self, action) -> dict[str, Any]:
@@ -258,24 +515,134 @@ class PoolService:
                     log.warning("refresh after command failed: %s", exc)
         return self.state()
 
+    async def _ensure_key(self, key: str, on: bool) -> None:
+        """Switch a device by key only if it isn't already there. A guest switch's
+        device goes through _ensure (guest settle overlay); any other through the
+        owner path (device settle overlay), refusing a reversal while it settles."""
+        role = self._role_of(key)
+        if role is not None:
+            await self._ensure(role, on)  # type: ignore[arg-type]
+            return
+        d = self._devices().get(key)
+        if d is None:
+            raise RuleError("that device isn't on the controller")
+        pending = self._pending_device(key)
+        if pending is not None:
+            if pending == on:
+                return  # already commanded; the cloud hasn't caught up yet
+            raise RuleError(f"{d['label']} is still changing; try again in a few seconds")
+        if d.get("on") == on:
+            return
+        await self.backend.adv_set_switch(key, on)
+        self._note_device(key, on)
+
+    async def _light_step(self, st: LightStep) -> None:
+        if not st.on or st.effect is None:
+            await self._ensure_key(st.key, st.on)
+            return
+        if self._role_of(st.key) == "light" and st.effect in self.snap.light_colors:
+            # The guest light: same path as the color chips (White maps onto the
+            # panel's own white).
+            if self.snap.light_on and self.snap.light_color == st.effect:
+                return
+            await self.backend.set_light_color(st.effect)
+            self._note_guest("light", True)
+            return
+        entry = next((x for x in (self.snap.advanced or {}).get("lights") or []
+                      if x.get("key") == st.key), None)
+        if entry is None or st.key not in self._devices():
+            raise RuleError("that light isn't on the controller")
+        if st.effect not in (entry.get("effects") or []):
+            raise RuleError("that light has no such effect")
+        if self._pending_device(st.key) is False:
+            raise RuleError("the light is still turning off; try again in a few seconds")
+        if self._devices()[st.key].get("on") and entry.get("effect") == st.effect:
+            return
+        await self.backend.adv_set_light_effect(st.key, st.effect)
+        self._note_device(st.key, True)
+
+    async def _run_step(self, st, lim: Limits) -> None:
+        if isinstance(st, SpaMaxStep):
+            # Never above the guest cap, even if the step says more.
+            cap = min(st.value, lim.spa_max)
+            if self.snap.spa_set is not None and self.snap.spa_set > cap:
+                await self.backend.set_spa_setpoint(cap)
+                self._note_setpoints(spa_set=cap)
+        elif isinstance(st, LightStep):
+            await self._light_step(st)
+        else:  # switch / scene: the device's own on/off state decides
+            await self._ensure_key(st.key, st.on)
+
+    def describe_step(self, st) -> str:
+        if isinstance(st, SpaMaxStep):
+            return f"spa set point at most {st.value}"
+        label = self._devices().get(st.key, {}).get("label") or st.key
+        if isinstance(st, LightStep) and st.on and st.effect:
+            return f"{label} {st.effect}"
+        return f"{label} {'on' if st.on else 'off'}"
+
+    async def _refresh_between_steps(self) -> bool:
+        """Fresh state before the next Hot Tub step (an earlier step, e.g. a OneTouch
+        scene, may have switched what the next one decides on). False when the
+        controller didn't give a usable state (stale twice, error, offline)."""
+        for attempt in range(2):
+            try:
+                await self._refresh()
+                return self.snap.connected
+            except StaleData:
+                if attempt == 0:
+                    await asyncio.sleep(self.stale_retry_seconds)
+            except Exception as exc:
+                log.warning("refresh between steps failed: %r", exc)
+                return False
+        return False
+
     async def set_mode(self, mode: str) -> dict[str, Any]:
+        """Hot Tub On (spa) / Off (pool): the configured steps, in order. Every step
+        is checked against the fresh panel (device present, kind fits, light effect
+        exists) before anything is sent; after each step the state is read again and
+        the next step decides from that (plus the settle overlay). A failing step, or
+        a state that can't be read between steps, stops the sequence and the error
+        says which step."""
         if mode not in ("pool", "spa"):
             raise RuleError(f"unknown mode {mode!r}")
+        seq = "hot_tub_on" if mode == "spa" else "hot_tub_off"
+        name = SEQUENCE_NAMES[seq]
 
         async def action() -> None:
+            cfg = self.app_config()
+            steps, lim = list(getattr(cfg, seq)), cfg.limits.to_limits()
+            n = len(steps)
+            for i, st in enumerate(steps, 1):
+                problem = self._step_problem(st)
+                if problem:
+                    log.warning("%s step %d (%s): %s", name, i, st, problem)
+                    raise RuleError(f"{name} can't run: step {i} of {n} ({self.describe_step(st)}): "
+                                    f"{problem}; check Settings")
             self.busy = mode
             try:
-                if mode == "spa":
-                    # Pump first: spa mode moves the valves, and the heater needs flow.
-                    await self._ensure("filter_pump", True)
-                    await self._ensure("spa_mode", True)
-                    # The guest cap applies to whatever is already on the panel too.
-                    if self.snap.spa_set is not None and self.snap.spa_set > self.limits.spa_max:
-                        await self.backend.set_spa_setpoint(self.limits.spa_max)
-                    await self._ensure("spa_heater", True)
-                else:
-                    await self._ensure("spa_heater", False)
-                    await self._ensure("spa_mode", False)
+                for i, st in enumerate(steps, 1):
+                    if i > 1 and not await self._refresh_between_steps():
+                        prev = self.describe_step(steps[i - 2])
+                        log.warning("%s: no usable state after step %d (%s)", name, i - 1, prev)
+                        raise RuleError(f"{name} stopped after step {i - 1} of {n} ({prev}): the "
+                                        "controller didn't report its state; the steps after it weren't run")
+                    what = self.describe_step(st)
+                    problem = self._step_problem(st)  # the panel may have changed meanwhile
+                    if problem:
+                        log.warning("%s stopped at step %d (%s): %s", name, i, what, problem)
+                        raise RuleError(f"{name} stopped at step {i} of {n} ({what}): {problem}; "
+                                        "the steps after it weren't run")
+                    try:
+                        await self._run_step(st, lim)
+                    except RuleError as exc:
+                        log.warning("%s stopped at step %d (%s): %s", name, i, what, exc)
+                        raise RuleError(f"{name} stopped at step {i} of {n} ({what}): {exc}") from exc
+                    except Exception as exc:
+                        # Details (library text, URLs) go to the log, not to guests.
+                        log.warning("%s failed at step %d (%s): %r", name, i, what, exc)
+                        raise SequenceError(f"{name} stopped at step {i} of {n} ({what}); "
+                                            "the steps after it weren't run") from exc
             finally:
                 self.busy = None
 
@@ -288,7 +655,7 @@ class PoolService:
                     return  # double tap; the first one is still taking effect
                 # Turning on always starts at white; picking a color is a separate step.
                 await self.backend.set_light_color(DEFAULT_COLOR)
-                self._commanded["light"] = (True, time.monotonic())
+                self._note_guest("light", True)
             else:
                 await self._ensure("light", on)
 
@@ -303,22 +670,27 @@ class PoolService:
             if color not in self.snap.light_colors:
                 raise RuleError(f"unknown light color {color!r}")
             await self.backend.set_light_color(color)
-            self._commanded["light"] = (True, time.monotonic())
+            self._note_guest("light", True)
 
         return await self._run(action)
 
     async def set_spa_setpoint(self, temp: int) -> dict[str, Any]:
-        lim = self.limits
-        if not lim.spa_min <= temp <= lim.spa_max:
-            raise RuleError(f"spa temperature must be between {lim.spa_min} and {lim.spa_max}")
-        return await self._run(lambda: self.backend.set_spa_setpoint(temp))
+        async def action() -> None:
+            # Limits read under the lock, after the refresh: a settings save that
+            # landed while this request queued applies to it.
+            lim = self.limits
+            if not lim.spa_min <= temp <= lim.spa_max:
+                raise RuleError(f"spa temperature must be between {lim.spa_min} and {lim.spa_max}")
+            await self.backend.set_spa_setpoint(temp)
+            self._note_setpoints(spa_set=temp)
+
+        return await self._run(action)
 
     async def set_pool_setpoints(self, heat: int, chill: int | None) -> dict[str, Any]:
-        lim = self.limits
-        if not lim.pool_heat_min <= heat <= lim.pool_heat_max:
-            raise RuleError(f"pool heat set point must be between {lim.pool_heat_min} and {lim.pool_heat_max}")
-
         async def action() -> None:
+            lim = self.limits  # under the lock, after the refresh (see set_spa_setpoint)
+            if not lim.pool_heat_min <= heat <= lim.pool_heat_max:
+                raise RuleError(f"pool heat set point must be between {lim.pool_heat_min} and {lim.pool_heat_max}")
             # Checked against fresh state: whether there is a chiller decides the rules.
             if self.snap.pool_chill_set is None:
                 if chill is not None:
@@ -331,11 +703,52 @@ class PoolService:
                 if chill - heat < lim.min_spread:
                     raise RuleError(f"chill must be at least {lim.min_spread} degrees above heat")
             await self.backend.set_pool_setpoints(heat, chill)
+            self._note_setpoints(pool_heat_set=heat, pool_chill_set=chill)
 
         return await self._run(action)
 
+    # ---- guest toggles -------------------------------------------------------------
+
+    async def set_toggle(self, tid: str, on: bool) -> dict[str, Any]:
+        """A configured guest toggle. Conflicts are checked against fresh state (a
+        conflicting toggle that is on refuses the request)."""
+        if self.app_config().toggle(tid) is None:
+            raise UnknownToggle("no such control")
+
+        async def action() -> None:
+            cfg = self.app_config()
+            t = cfg.toggle(tid)
+            if t is None:
+                raise RuleError("that control was just removed; reload the page")
+            if not self._key_known(t.key):
+                raise RuleError(f"{t.label} isn't available on the controller")
+            role = self._protected_keys(self._switch_keys()).get(t.key)
+            if role is not None:
+                # Saved before the env map gave this device a pump/heater role.
+                log.warning("guest toggle %r drives %s (%s); refused", tid, t.key, role)
+                raise RuleError(f"{t.label} runs the {ROLE_LABELS[role].lower()}; guests can't switch it")
+            if on:
+                for cid in t.conflicts:
+                    other = cfg.toggle(cid)
+                    if other is not None and self._key_on(other.key):
+                        raise RuleError(f"turn off {other.label} before {t.label}")
+            await self._ensure_key(t.key, on)
+
+        return await self._run(action)
+
+    async def _legacy_toggle(self, tid: str, on: bool, fallback) -> dict[str, Any]:
+        """Old fixed endpoints: the toggle with that id when there is one; on
+        defaults whose device didn't resolve, the old behaviour; refused once the
+        owner's saved settings have no such toggle."""
+        if self.app_config().toggle(tid) is not None:
+            return await self.set_toggle(tid, on)
+        if self.config.saved:
+            raise UnknownToggle("no such control")
+        return await fallback()
+
     async def set_bubbles(self, on: bool) -> dict[str, Any]:
-        return await self._run(lambda: self._ensure("bubbles", on))
+        return await self._legacy_toggle(
+            "bubbles", on, lambda: self._run(lambda: self._ensure("bubbles", on)))
 
     async def set_spillover(self, on: bool) -> dict[str, Any]:
         async def action() -> None:
@@ -343,7 +756,7 @@ class PoolService:
                 raise RuleError("turn off Water Features before Spillover")
             await self._ensure("spillover", on)
 
-        return await self._run(action)
+        return await self._legacy_toggle("spillover", on, lambda: self._run(action))
 
     async def set_water_features(self, on: bool) -> dict[str, Any]:
         async def action() -> None:
@@ -351,4 +764,4 @@ class PoolService:
                 raise RuleError("turn off Spillover before Water Features")
             await self._ensure("water_features", on)
 
-        return await self._run(action)
+        return await self._legacy_toggle("water_features", on, lambda: self._run(action))

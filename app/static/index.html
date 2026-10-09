@@ -18,11 +18,27 @@
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="stylesheet" href="/static/install.css">
   <script src="/static/install.js" defer></script>
+  <link rel="stylesheet" href="/static/settings.css">
+  <!-- QR encoder: Kazuhiko Arase's qrcode-generator 2.0.4 (MIT), the upstream
+       npm file dist/qrcode.js copied unchanged from
+       https://registry.npmjs.org/qrcode-generator/-/qrcode-generator-2.0.4.tgz
+       (tarball sha1 e8b3f30922577eba52078aa9c0d5a2a74fe1fd94). Runs in the browser only. -->
+  <script src="/static/vendor/qrcode-generator-2.0.4.js" defer></script>
+  <script src="/static/settings.js" defer></script>
+  <link rel="stylesheet" href="/static/owner.css">
+  <script src="/static/owner.js" defer></script>
 </head>
 <body class="loading" data-mode="pool">
   <header class="topbar">
     <h1>Pool &amp; Spa</h1>
     <span id="conn" class="dot" role="img" aria-label="Connecting" title="Connecting"></span>
+    <button id="settings-btn" class="icon-btn settings-btn" type="button" aria-label="Settings" aria-haspopup="dialog" aria-controls="settings" aria-describedby="settings-badge-text" title="Settings">
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false"><path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      <!-- Equipment alert count, filled in by app.js; described (not named) so the button stays "Settings". -->
+      <span id="settings-badge" class="settings-badge" aria-hidden="true" hidden></span>
+    </button>
+    <!-- Hidden, but still read as the button's description via aria-describedby. -->
+    <span id="settings-badge-text" hidden></span>
   </header>
 
   <div id="banner" class="banner" role="alert" hidden>Can't reach the pool controller</div>
@@ -30,8 +46,8 @@
   <main>
     <section id="weather" class="card" aria-label="Weather" hidden></section>
 
-    <section class="card" aria-label="Function">
-      <div class="temps">
+    <section id="function-card" class="card" aria-label="Function">
+      <div class="temps" id="temps">
         <div class="temp">
           <div class="temp-label">Water Temp</div>
           <div class="temp-num" id="water-cur">--</div>
@@ -42,7 +58,7 @@
         </div>
       </div>
 
-      <div class="segmented" role="group" aria-label="Mode">
+      <div class="segmented" id="mode-switch" role="group" aria-label="Mode">
         <button id="mode-pool" class="seg" type="button" aria-pressed="true" data-target="pool" aria-label="Hot tub off, Pool Mode"><span class="seg-main">Hot Tub Off</span><span class="seg-sub">Pool Mode</span></button>
         <button id="mode-spa" class="seg" type="button" aria-pressed="false" data-target="spa" aria-label="Hot tub on, Spa Mode"><span class="seg-main">Hot Tub On</span><span class="seg-sub">Spa Mode</span></button>
       </div>
@@ -63,7 +79,8 @@
       <p id="light-note" class="note light-note" hidden>Light may cycle on and off a few times when turned on or changing color.</p>
     </section>
 
-    <section class="card" aria-label="Options">
+    <section id="options-card" class="card" aria-label="Options">
+      <div id="setpoints">
       <h2 class="subhead set-head">Set Temp</h2>
       <!-- Spa mode: one set point. Phones: number above the bar; wider: number right of it. -->
       <div class="sp spa-sp" id="spa-col">
@@ -98,41 +115,14 @@
       </div>
       <p class="note" id="spread-note" hidden></p>
 
-      <!-- Spa mode toggles -->
-      <div id="spa-panel" hidden>
-        <button id="t-bubbles" class="toggle" type="button" aria-pressed="false">
-          <span class="toggle-label">Bubbles</span>
-          <span class="switch" aria-hidden="true"></span>
-        </button>
       </div>
 
-      <!-- Pool mode toggles -->
-      <div id="pool-panel">
-        <button id="t-spill" class="toggle" type="button" aria-pressed="false" aria-describedby="spill-hint">
-          <span class="toggle-label">Spillover</span>
-          <span class="switch" aria-hidden="true"></span>
-        </button>
-        <p class="hint" id="spill-hint" hidden>Turn off Water Features to use Spillover</p>
-
-        <button id="t-wf" class="toggle" type="button" aria-pressed="false" aria-describedby="wf-hint">
-          <span class="toggle-label">Water Features</span>
-          <span class="switch" aria-hidden="true"></span>
-        </button>
-        <p class="hint" id="wf-hint" hidden>Turn off Spillover to use Water Features</p>
-        <p class="hint cover-hint" id="cover-hint" hidden>The pool cover is closed — the panel blocks Spillover and Water Features while covered.</p>
-      </div>
+      <!-- Guest toggles, drawn by app.js from state.toggles (which ones, their
+           labels, modes and conflicts come from Settings → Guest toggles). -->
+      <div id="toggles" class="toggles"></div>
+      <p class="hint cover-hint" id="cover-hint" hidden>The pool cover is closed — the panel may block some pool features while covered.</p>
     </section>
 
-    <!-- Owner's read-only view of what the panel reports. Collapsed by default;
-         rendered by app.js from state.equipment on every poll. Sends nothing. -->
-    <details id="equip" class="card equip">
-      <summary class="equip-sum">
-        <span class="equip-title">Equipment status</span>
-        <span id="equip-flag" class="equip-flag" hidden></span>
-        <svg class="equip-chev" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
-      </summary>
-      <div id="equip-body" class="equip-body"><p class="note">No status from the panel yet.</p></div>
-    </details>
   </main>
 
   <dialog id="color-sheet" class="sheet" aria-labelledby="color-h">
@@ -146,6 +136,167 @@
       <div id="chips" class="chips" role="group" aria-labelledby="color-h"></div>
     </div>
   </dialog>
+
+  <!-- Owner's settings, in three sections picked from the ☰ menu: Settings
+       (printable QR codes), Advanced (owner controls) and Equipment status.
+       The QR inputs are never sent to the server or stored (see settings.js). -->
+  <dialog id="settings" class="sheet settings-sheet" aria-label="Settings">
+    <div class="sheet-inner settings-inner">
+      <div class="settings-head">
+        <div class="sheet-head">
+          <button id="settings-menu-btn" class="icon-btn menu-btn" type="button" aria-label="Sections" aria-expanded="false" aria-controls="settings-menu">
+            <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false"><path d="M4 6.5h16M4 12h16M4 17.5h16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/></svg>
+            <span id="menu-btn-badge" class="settings-badge" aria-hidden="true" hidden></span>
+          </button>
+          <!-- Names the current section; focused when a section is picked. -->
+          <h2 id="settings-h" class="settings-title" tabindex="-1">Settings</h2>
+          <button id="settings-close" class="sheet-close" type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" fill="none"/></svg>
+          </button>
+        </div>
+        <nav id="settings-menu" class="settings-menu" aria-label="Settings sections" hidden>
+          <ul>
+            <li><button type="button" class="menu-item" data-view="view-settings" aria-current="page">Settings</button></li>
+            <li><button type="button" class="menu-item" data-view="adv-root">Advanced</button></li>
+            <li><button type="button" class="menu-item" data-view="equip">Equipment status <span id="equip-menu-badge" class="equip-flag" hidden></span></button></li>
+          </ul>
+        </nav>
+      </div>
+
+      <!-- 1. Settings (default): the app's own configuration (GET/PUT
+           /api/config), drawn by owner.js. Anyone can read it; editing needs the
+           owner PIN. "QR codes & sign" is client-only (settings.js). -->
+      <section id="view-settings" class="set-view" data-title="Settings" aria-labelledby="settings-h">
+        <div id="set-owner" class="set-sec owner-sec"></div>
+        <p id="set-top" class="form-msg" role="alert" hidden></p>
+        <div id="set-main" class="set-sec">
+          <div class="set-sec-head"><h3 id="set-main-h" class="set-sec-title">Main page</h3></div>
+          <div class="set-body"><p class="note set-placeholder">Loading…</p></div>
+        </div>
+        <div id="set-limits" class="set-sec">
+          <div class="set-sec-head"><h3 id="set-limits-h" class="set-sec-title">Temperature limits</h3></div>
+          <div class="set-body"></div>
+        </div>
+        <div id="set-hottub" class="set-sec">
+          <div class="set-sec-head"><h3 id="set-hottub-h" class="set-sec-title">Hot Tub On / Off</h3></div>
+          <div class="set-body"></div>
+        </div>
+        <div id="set-toggles" class="set-sec">
+          <div class="set-sec-head"><h3 id="set-toggles-h" class="set-sec-title">Guest toggles</h3></div>
+          <div class="set-body"></div>
+        </div>
+        <div id="set-weather" class="set-sec">
+          <div class="set-sec-head"><h3 id="set-weather-h" class="set-sec-title">Weather</h3></div>
+          <div class="set-body"></div>
+        </div>
+        <div id="set-actions" class="set-actions" hidden>
+          <p id="set-status" class="set-status" role="status"></p>
+          <div class="set-actions-row">
+            <button id="set-discard" class="btn-secondary" type="button">Discard</button>
+            <button id="set-save" class="btn-primary" type="button">Save</button>
+          </div>
+        </div>
+        <div id="set-reset-wrap" class="set-sec" hidden>
+          <button id="set-reset" class="btn-secondary btn-danger" type="button">Reset to defaults</button>
+          <p class="note">Puts every setting above back to the server's defaults.</p>
+        </div>
+        <div id="qr" class="set-sec">
+          <div class="set-sec-head"><h3 id="qr-h" class="set-sec-title">QR codes &amp; sign</h3></div>
+          <p class="note">Print a sign for the pool so guests can scan their way in.</p>
+
+          <div class="qr-gen">
+            <h4 class="qr-gen-title">Open the pool page</h4>
+            <label class="field">
+              <span class="field-label">Page address</span>
+              <input id="qr-url" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">
+            </label>
+            <div id="qr-url-code" class="qr-code"></div>
+          </div>
+
+          <div class="qr-gen">
+            <h4 class="qr-gen-title">Join the Wi-Fi <span class="qr-opt">(optional)</span></h4>
+            <label class="field">
+              <span class="field-label">Network name</span>
+              <input id="qr-ssid" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+            </label>
+            <label class="field">
+              <span class="field-label">Password</span>
+              <!-- type=text, not password: browsers would offer to save it. -->
+              <input id="qr-pass" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true">
+            </label>
+            <div class="field-row">
+              <label class="field field-inline">
+                <span class="field-label">Security</span>
+                <select id="qr-sec">
+                  <option value="WPA" selected>WPA/WPA2/WPA3</option>
+                  <option value="nopass">None</option>
+                </select>
+              </label>
+              <label class="check">
+                <input id="qr-hidden" type="checkbox">
+                <span>Hidden network</span>
+              </label>
+            </div>
+            <p class="note">The Wi-Fi password stays on this device: it is never sent to the server or saved.</p>
+            <div id="qr-wifi-code" class="qr-code"></div>
+          </div>
+
+          <div class="qr-gen">
+            <label class="field">
+              <span class="field-label">Sign title</span>
+              <input id="qr-title" type="text" value="Pool &amp; Spa" autocomplete="off">
+            </label>
+            <button id="qr-print" class="btn-primary" type="button">Print sign</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Advanced: owner controls (GET/POST /api/advanced), drawn by owner.js.
+           Needs the owner PIN; every write asks for confirmation first. -->
+      <section id="adv-root" class="set-view" data-title="Advanced" aria-labelledby="settings-h" hidden>
+        <div id="adv-owner" class="set-sec owner-sec"></div>
+        <div id="adv-body" class="adv-body"></div>
+      </section>
+
+      <!-- 3. Equipment status: read-only view of what the panel reports, rendered
+           by app.js from state.equipment on every poll. Sends nothing. -->
+      <section id="equip" class="set-view equip" data-title="Equipment status" aria-labelledby="settings-h" hidden>
+        <div class="set-sec">
+          <div class="equip-flag-row"><span id="equip-flag" class="equip-flag" hidden></span></div>
+          <div id="equip-body" class="equip-body"><p class="note">No status from the panel yet.</p></div>
+        </div>
+      </section>
+    </div>
+  </dialog>
+
+  <!-- Confirmation for every owner write (owner.js). Outside the Settings
+       dialog so its keys and clicks don't reach that dialog's handlers. -->
+  <dialog id="confirm-dlg" class="confirm-dlg" aria-labelledby="confirm-h" aria-describedby="confirm-body">
+    <div class="confirm-inner">
+      <h2 id="confirm-h" class="confirm-h"></h2>
+      <p id="confirm-body" class="confirm-body"></p>
+      <div class="confirm-actions">
+        <button id="confirm-cancel" class="btn-secondary" type="button">Cancel</button>
+        <button id="confirm-ok" class="btn-primary" type="button">OK</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- The printed sign. Hidden on screen; settings.js fills it and app.css's
+       print rules show only it while a "Print sign" is in progress. -->
+  <section id="print-sign" class="print-sign" aria-hidden="true">
+    <h1 id="ps-title" class="ps-title"></h1>
+    <div class="ps-codes">
+      <figure id="ps-wifi" class="ps-fig">
+        <div id="ps-wifi-code" class="ps-code"></div>
+        <figcaption><span class="ps-cap">1. Join the Wi-Fi</span><span id="ps-ssid" class="ps-sub"></span></figcaption>
+      </figure>
+      <figure id="ps-url" class="ps-fig">
+        <div id="ps-url-code" class="ps-code"></div>
+        <figcaption><span id="ps-url-cap" class="ps-cap">2. Open the pool controls</span><span id="ps-url-text" class="ps-sub ps-url"></span></figcaption>
+      </figure>
+    </div>
+  </section>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>

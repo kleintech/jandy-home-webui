@@ -10,8 +10,15 @@ services:
       - "8080:8080"
     read_only: true
     user: "1000:1000"
+    # Owner settings saved from the page (CONFIG_PATH, default /data/config.json).
+    # A new named volume starts as a copy of the image's /data (owned by uid 1000).
+    volumes:
+      - pool-config:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+volumes:
+  pool-config:
