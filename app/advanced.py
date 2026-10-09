@@ -109,9 +109,16 @@ def boost_params(action: str, hours: int | None, mode: str | None) -> dict[str, 
         if type(hours) is not int or not 1 <= hours <= 24 or mode not in BOOST_MODES:
             raise BackendError("invalid boost settings")
         return {"boosthrs": str(hours), "boostmode": mode, "boostcontrol": "start"}
-    # stop/pause/resume act on the running boost; the reference lists boosthrs and
-    # boostmode for the command, but they only configure a start.
-    return {"boostcontrol": action}
+    # stop/pause/resume: the reference lists boosthrs and boostmode for every
+    # control_swc_boost, so they carry the cell's current values (from its config).
+    # If the cell didn't report them, they are left out rather than invented: a
+    # running boost must stay stoppable.
+    out = {}
+    if type(hours) is int and 1 <= hours <= 24:
+        out["boosthrs"] = str(hours)
+    if mode in BOOST_MODES:
+        out["boostmode"] = mode
+    return {**out, "boostcontrol": action}
 
 
 def _int(v: Any) -> int | None:
@@ -144,8 +151,11 @@ def parse_swc_config(data: Any) -> dict[str, Any]:
         raise ValueError("device offline")
     if _pct(data.get("poolSWCSP")) is None and _pct(data.get("spaSWCSP")) is None:
         raise ValueError("no salt cell set points in the reply")
-    raw = text(data.get("boostStatus")).lower()
-    boost_status = {"on": "on", "paused": "paused", "": "off"}.get(raw, "unknown")
+    raw = data.get("boostStatus")
+    # Only a string is a status ("" = off). Anything else (absent, null, a number,
+    # an object) is unknown, which refuses start/stop/pause/resume.
+    boost_status = ({"on": "on", "paused": "paused", "": "off"}.get(raw.strip().lower(), "unknown")
+                    if isinstance(raw, str) else "unknown")
     mode = text(data.get("boostMode")).lower()
     return {
         "pool_pct": _pct(data.get("poolSWCSP")),
@@ -367,9 +377,13 @@ class AdvancedControls:
                 raise _rule("the current pool heat set point isn't known; send it")
             if spa is not None and spa != s.spa_set:
                 await self.svc.backend.set_spa_setpoint(spa)
+                self.svc._note_setpoints(spa_set=spa)
             if pool:
                 # The backend orders the two writes so a failure can't invert them.
                 await self.svc.backend.set_pool_setpoints(heat, pool_chill)
+                # Trusted while the cloud catches up, so the next single-value
+                # request checks the spread against these, not the old values.
+                self.svc._note_setpoints(pool_heat_set=heat, pool_chill_set=pool_chill)
 
         return await self._do(action)
 
@@ -469,14 +483,16 @@ class AdvancedControls:
                        "resume": ("paused",)}[action_name]
             if status not in allowed:
                 raise _rule(f"can't {action_name} a boost that is {status}")
-            use_mode = mode
+            # stop/pause/resume carry the cell's current hours and mode (see boost_params).
+            use_hours, use_mode = (hours, mode) if action_name == "start" else (
+                cfg["boost"]["hours"], cfg["boost"]["mode"])
             if action_name == "start":
                 if not cfg["boost"]["dip_enabled"]:
                     raise _rule("boost is disabled on the salt cell (DIP switch)")
                 use_mode = mode or cfg["boost"]["mode"]
                 if use_mode is None:
                     raise _rule("mode is required to start a boost")
-            self._store_salt(await self.svc.backend.salt_boost(action_name, hours, use_mode))
+            self._store_salt(await self.svc.backend.salt_boost(action_name, use_hours, use_mode))
 
         return await self._do(action)
 
@@ -528,11 +544,14 @@ class BoostReq(_Body):
 
 
 def router(get_svc: Callable[[], PoolService], require_owner: Callable,
-           call: Callable) -> APIRouter:
+           call: Callable, same_origin: Callable | None = None) -> APIRouter:
     def no_store(response: Response) -> None:
         response.headers["Cache-Control"] = "no-store"
 
-    r = APIRouter(prefix="/api/advanced", dependencies=[Depends(require_owner), Depends(no_store)])
+    # same_origin (owner_auth's CSRF guard) first: a cross-site write gets 403 whether
+    # or not the browser holds a session.
+    deps = ([Depends(same_origin)] if same_origin else []) + [Depends(require_owner), Depends(no_store)]
+    r = APIRouter(prefix="/api/advanced", dependencies=deps)
 
     def ctl() -> AdvancedControls:
         return AdvancedControls.of(get_svc())

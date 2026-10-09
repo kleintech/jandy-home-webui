@@ -21,6 +21,8 @@
   --warn: #d97706;
   --warn-text: #9a4a03;   /* readable on --card (warn itself is too light for text) */
   --bad: #dc2626;
+  --bad-fill: #dc2626;    /* background behind white text (CAUTION tag, danger buttons): 4.8:1 */
+  --bad-text: #b91c1c;    /* red text on --seg-bg / --bg (--bad there is only 4.1:1) */
   --banner-bg: #fde8e8;
   --banner-text: #8a1c1c;
   --toast-bg: #1f2937;
@@ -56,6 +58,8 @@
     --warn: #fbbf24;
     --warn-text: #fcd34d;
     --bad: #f87171;
+    --bad-fill: #b91c1c;  /* --bad is too light under white text (2.8:1); this is 6.5:1 */
+    --bad-text: #f87171;
     --banner-bg: #3b1518;
     --banner-text: #fecaca;
     --toast-bg: #e6edf3;
@@ -225,7 +229,7 @@ body.offline main { opacity: .6; }
   text-align: left;
   cursor: pointer;
 }
-.toggle-label { font-size: 18px; font-weight: 600; }
+.toggle-label { min-width: 0; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
 
 .switch {
   position: relative;

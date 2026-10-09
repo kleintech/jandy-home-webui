@@ -76,10 +76,10 @@ def test_without_a_valid_owner_pin_advanced_is_off(pin):
 def test_owner_pin_from_env(monkeypatch):
     # Bug: OWNER_PIN/OWNER_SECRET not read, so the section can never be enabled, or
     # a cookie signed before a restart is rejected even with OWNER_SECRET set.
-    monkeypatch.setenv("OWNER_PIN", "2468")
-    monkeypatch.setenv("OWNER_SECRET", "abc")
+    monkeypatch.setenv("OWNER_PIN", "246802")
+    monkeypatch.setenv("OWNER_SECRET", "a" * 32)
     a, b = OwnerGate.from_env(), OwnerGate.from_env()
-    assert a.enabled and a.check_pin("2468") and not a.check_pin("2469")
+    assert a.enabled and a.check_pin("246802") and not a.check_pin("246803")
     assert b.verify(a.issue())
     monkeypatch.delenv("OWNER_SECRET")
     assert not OwnerGate.from_env().verify(OwnerGate.from_env().issue())
@@ -274,7 +274,7 @@ def test_lock_clears_the_session(app):
     # Bug: "Lock" leaves the browser unlocked.
     c, _ = app
     unlock(c)
-    r = c.post("/api/advanced/lock")
+    r = c.post("/api/advanced/lock", json={})
     assert r.status_code == 200 and r.json() == {"unlocked": False}
     assert COOKIE in r.headers["set-cookie"] and "max-age=0" in r.headers["set-cookie"].lower()
     assert c.get("/api/advanced").status_code == 401
@@ -310,3 +310,177 @@ def test_mock_owner_round_trip(app):
     assert v["setpoints"]["spa"]["value"] == 104
     assert v["salt"]["config"]["spa_pct"] == 30 and v["salt"]["config"]["boost"]["status"] == "on"
     assert next(x for x in v["lights"] if x["key"] == "aux_1")["effect"] == "Violet"
+
+
+# ---- PIN and secret strength ---------------------------------------------------------
+
+@pytest.mark.parametrize("pin", ["1234", "12345", "١٢٣٤٥٦", "１２３４５６", "1234567890123"])
+def test_short_or_non_ascii_pins_turn_the_gate_off(pin, caplog):
+    # Bug: a 4-5 digit PIN (10^4 guesses) or Unicode digits (\d matches Arabic-Indic
+    # and full-width digits, which a phone keypad can't type) accepted as the PIN.
+    with caplog.at_level(logging.ERROR):
+        gate = OwnerGate(pin, b"s")
+    assert not gate.enabled
+    assert "OWNER_PIN must be 6-12 digits" in caplog.text
+
+
+def test_six_digit_pin_is_accepted():
+    # Bug: the length floor raised past what the README documents (6).
+    assert OwnerGate("246802", b"s").enabled
+
+
+def test_short_owner_secret_is_ignored(monkeypatch, caplog):
+    # Bug: OWNER_SECRET=abc used as the cookie signing key; a guessable key lets
+    # anyone forge an owner cookie offline.
+    monkeypatch.setenv("OWNER_PIN", "246802")
+    monkeypatch.setenv("OWNER_SECRET", "a" * 31)
+    with caplog.at_level(logging.WARNING):
+        a, b = OwnerGate.from_env(), OwnerGate.from_env()
+    assert "OWNER_SECRET is shorter than 32" in caplog.text
+    assert not b.verify(a.issue())  # random per process, not the weak secret
+    assert not OwnerGate("246802", b"a" * 31).verify(a.issue())
+
+
+# ---- guest view of the settings -------------------------------------------------------
+
+def _weather_client(gate):
+    from app.config_store import ConfigStore, Limits
+    store = ConfigStore(None, Limits(), weather={"zip": "12345", "country": "us", "lat": 40.1,
+                                                 "lon": -75.2, "label": "Home"})
+    c = TestClient(create_app(PoolService(MockBackend(), poll_seconds=3600, config=store), gate))
+    c.__enter__()
+    return c
+
+
+def test_guests_get_only_the_weather_label(gate):
+    # Bug: GET /api/config (public) handing every guest the house's zip code and
+    # coordinates.
+    c = _weather_client(gate)
+    try:
+        assert c.get("/api/config").json()["weather"] == {"label": "Home"}
+        unlock(c)
+        w = c.get("/api/config").json()["weather"]
+        assert w["zip"] == "12345" and w["lat"] == 40.1 and w["lon"] == -75.2
+    finally:
+        c.__exit__(None, None, None)
+
+
+def test_owner_save_and_reset_answers_carry_the_full_weather_location(gate):
+    # Bug: PUT /api/config or POST /api/config/reset answering with the guest
+    # (redacted) copy; the page adopts that answer as its draft, so the next Save
+    # would drop the zip and coordinates.
+    c = _weather_client(gate)
+    try:
+        unlock(c)
+        doc = c.get("/api/config").json()
+        saved = c.put("/api/config", json=doc).json()
+        assert saved["weather"]["zip"] == "12345" and saved["weather"]["lat"] == 40.1
+        assert "redacted" not in saved
+        reset = c.post("/api/config/reset", json={}).json()
+        assert reset["weather"]["zip"] == "12345" and reset["weather"]["lon"] == -75.2
+        assert "redacted" not in reset
+    finally:
+        c.__exit__(None, None, None)
+
+
+def test_guest_copy_of_the_settings_cant_be_saved_back(gate):
+    # Bug: a page that loaded the redacted (guest) settings, then unlocked and saved,
+    # silently wiped the weather location.
+    c = _weather_client(gate)
+    try:
+        guest_doc = c.get("/api/config").json()
+        unlock(c)
+        r = c.put("/api/config", json=guest_doc)
+        assert r.status_code == 409
+        assert c.get("/api/config").json()["weather"]["zip"] == "12345"
+    finally:
+        c.__exit__(None, None, None)
+
+
+# ---- cross-site requests ----------------------------------------------------------------
+
+def _owner_writes(c):
+    doc = c.get("/api/config").json()
+    return [("post", "/api/advanced/unlock", {"pin": PIN}),
+            ("post", "/api/advanced/lock", {}),
+            ("post", "/api/advanced/switch", {"key": "aux_4", "on": True}),
+            ("put", "/api/config", doc),
+            ("post", "/api/config/reset", {})]
+
+
+@pytest.mark.parametrize("headers", [
+    {"Sec-Fetch-Site": "cross-site"},
+    {"Sec-Fetch-Site": "same-site"},
+    {"Origin": "http://evil.example"},
+    {"Origin": "https://testserver"},       # same host, other scheme
+    {"Origin": "http://testserver:8080"},   # same host, other port
+    {"Origin": "null"},
+])
+def test_cross_site_owner_writes_are_refused(app, headers):
+    # Bug: a page on another site (or a sibling subdomain) driving owner writes from
+    # an unlocked owner's browser: unlock/lock (login CSRF), switching devices,
+    # rewriting or resetting the settings.
+    c, backend = app
+    unlock(c)
+    before = c.get("/api/config").json()
+    for method, path, body in _owner_writes(c):
+        r = c.request(method, path, json=body, headers=headers)
+        assert r.status_code == 403, (path, headers, r.status_code)
+    assert writes(backend) == []
+    assert c.get("/api/config").json() == before
+    assert c.get("/api/advanced").status_code == 200  # still unlocked: lock was refused too
+
+
+@pytest.mark.parametrize("headers", [
+    {"Sec-Fetch-Site": "same-origin", "Origin": "http://testserver"},
+    {"Sec-Fetch-Site": "none"},
+    {"Origin": "https://pool.example", "Host": "pool.example", "X-Forwarded-Proto": "https"},
+    {"Origin": "https://pool.example", "X-Forwarded-Host": "pool.example", "X-Forwarded-Proto": "https"},
+])
+def test_same_origin_owner_writes_still_work(app, headers):
+    # Bug: the CSRF check refusing the app's own page, directly or behind Traefik
+    # (TLS terminated: X-Forwarded-Proto https, Host passed through).
+    c, backend = app
+    unlock(c)  # plain http here: a Secure cookie (X-Forwarded-Proto https) wouldn't come back
+    r = c.post("/api/advanced/switch", json={"key": "aux_4", "on": True}, headers=headers)
+    assert r.status_code == 200, r.text
+    assert c.post("/api/config/reset", json={}, headers=headers).status_code == 200
+    assert c.post("/api/advanced/lock", json={}, headers=headers).status_code == 200
+    assert c.post("/api/advanced/unlock", json={"pin": PIN}, headers=headers).status_code == 200
+
+
+@pytest.mark.parametrize("ctype", [None, "text/plain", "application/x-www-form-urlencoded",
+                                   "multipart/form-data; boundary=x"])
+def test_owner_writes_must_be_json(app, ctype):
+    # Bug: a cross-site <form> (which can only send these types, with no preflight)
+    # posting to reset, lock or unlock, which take no JSON fields worth checking.
+    c, backend = app
+    unlock(c)
+    h = {} if ctype is None else {"content-type": ctype}
+    for path, body in [("/api/config/reset", ""), ("/api/advanced/lock", ""),
+                       ("/api/advanced/unlock", f'{{"pin": "{PIN}"}}'),
+                       ("/api/advanced/switch", '{"key": "aux_4", "on": true}')]:
+        r = c.post(path, content=body, headers=h)
+        assert r.status_code == 415, (path, ctype, r.status_code)
+    assert writes(backend) == []
+    assert c.get("/api/advanced").status_code == 200
+
+
+def test_openapi_schema_is_not_served(app):
+    # Bug: /openapi.json listing every owner route and body shape to anyone.
+    c, _ = app
+    assert c.get("/openapi.json").status_code == 404
+
+
+# ---- container -------------------------------------------------------------------------
+
+def test_container_does_not_trust_forwarded_headers_from_every_peer():
+    # Bug: uvicorn --forwarded-allow-ips='*' lets any LAN client set X-Forwarded-For,
+    # making request.client.host (the PIN rate-limit key, the logged address)
+    # attacker-controlled. uvicorn's default trusts only 127.0.0.1 (or
+    # $FORWARDED_ALLOW_IPS); OWNER_TRUSTED_PROXIES handles real proxies itself.
+    from pathlib import Path
+    dockerfile = (Path(__file__).parent.parent / "Dockerfile").read_text()
+    cmd = next(line for line in dockerfile.splitlines() if line.startswith("CMD"))
+    assert "forwarded-allow-ips" not in cmd
+    assert "uvicorn app.main:app" in cmd

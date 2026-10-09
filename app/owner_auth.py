@@ -1,19 +1,28 @@
 """Owner gate for the Advanced controls. The guest UI has no login (it lives on the
 LAN); the owner unlocks the Advanced section with a PIN.
 
-- `OWNER_PIN` (4-12 digits) turns the gate on. Unset or malformed: every Advanced
-  endpoint answers 403 and `/api/state` reports `advanced.enabled = false`.
+- `OWNER_PIN` (6-12 ASCII digits) turns the gate on. Unset or malformed: every
+  Advanced endpoint answers 403 and `/api/state` reports `advanced.enabled = false`.
 - `POST /api/advanced/unlock {"pin"}` compares in constant time and, on success, sets
   an HttpOnly, SameSite=Strict cookie (Secure when the request came over HTTPS,
   directly or per X-Forwarded-Proto) holding an HMAC-signed expiry, valid 30 days.
   The signing key is derived from `OWNER_SECRET` and the PIN, so changing the PIN
-  logs every owner out. Without `OWNER_SECRET` a random secret is made at start-up,
-  so a restart logs owners out too.
-- `POST /api/advanced/lock` clears the cookie on that browser. (The token is
+  logs every owner out. Without `OWNER_SECRET` (or with one under 32 characters,
+  which is ignored with a warning) a random secret is made at start-up, so a
+  restart logs owners out too.
+- `POST /api/advanced/lock` (send `{}` as JSON) clears the cookie on that browser. (The token is
   stateless: a copied cookie stays valid until it expires or the PIN/secret changes.)
 - Failed unlocks are limited per client (5 per 5 minutes) and globally (10 per 15
   minutes, so many addresses can't share the work), answering 429 while limited
-  even for the right PIN. Failures are logged without the PIN.
+  even for the right PIN. Failures are logged without the PIN. The global limit is
+  a deliberate trade-off: behind k3s ServiceLB (externalTrafficPolicy Cluster)
+  every client arrives from the same address, so it is the limit that actually
+  holds, and a guest typing wrong PINs can delay an owner's unlock for up to 15
+  minutes. Browsers that are already unlocked are unaffected.
+- Every owner POST/PUT (unlock and lock included, see `same_origin`) is refused
+  (403) when the browser says it is cross-site (Sec-Fetch-Site) or the Origin
+  isn't this site, and must be sent as application/json (415 otherwise), so a
+  page elsewhere can't drive them with a form post.
 
 The client address is the TCP peer. `OWNER_TRUSTED_PROXIES` (comma-separated IPs or
 CIDRs, e.g. the Traefik pod network) makes the gate take the client from
@@ -35,7 +44,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 log = logging.getLogger(__name__)
@@ -44,7 +53,11 @@ COOKIE = "pool_owner"
 TOKEN_TTL = 30 * 24 * 3600
 DISABLED_DETAIL = "Advanced controls are off: set OWNER_PIN"
 LOCKED_DETAIL = "Owner PIN required"
-PIN_RE = re.compile(r"\d{4,12}")
+# ASCII only: \d would also take Arabic-Indic or full-width digits.
+PIN_RE = re.compile(r"[0-9]{6,12}")
+MIN_SECRET = 32
+CROSS_SITE_DETAIL = "Cross-site request refused"
+JSON_DETAIL = "Send this request as application/json"
 MAX_TRACKED_CLIENTS = 1024
 
 
@@ -79,7 +92,8 @@ class OwnerGate:
                  global_limit: tuple[int, float] = (10, 900.0)) -> None:
         pin = (pin or "").strip()
         if pin and not PIN_RE.fullmatch(pin):
-            log.error("OWNER_PIN must be 4-12 digits; Advanced controls are off")
+            log.error("OWNER_PIN must be 6-12 digits (0-9); owner controls (Advanced, "
+                      "Settings changes) are OFF until it is fixed")
             pin = ""
         self.enabled = bool(pin)
         self._pin_digest = hashlib.sha256(pin.encode()).digest()
@@ -102,7 +116,11 @@ class OwnerGate:
     @classmethod
     def from_env(cls) -> OwnerGate:
         secret = os.environ.get("OWNER_SECRET") or None
-        if os.environ.get("OWNER_PIN") and not secret:
+        if secret is not None and len(secret) < MIN_SECRET:
+            log.warning("OWNER_SECRET is shorter than %d characters; ignoring it (owner sessions "
+                        "end when the app restarts). Use e.g. `openssl rand -hex 32`", MIN_SECRET)
+            secret = None
+        elif os.environ.get("OWNER_PIN") and not secret:
             log.info("OWNER_SECRET not set: owner sessions end when the app restarts")
         return cls(os.environ.get("OWNER_PIN"), secret.encode() if secret else None,
                    trusted_proxies=os.environ.get("OWNER_TRUSTED_PROXIES", ""))
@@ -194,13 +212,49 @@ def _https(request: Request) -> bool:
     return request.url.scheme == "https" or proto == "https"
 
 
+def _origin_key(scheme: str, netloc: str) -> tuple[str, str]:
+    scheme, netloc = scheme.lower(), netloc.strip().lower()
+    default = {"http": ":80", "https": ":443"}.get(scheme)
+    if default and netloc.endswith(default):
+        netloc = netloc[: -len(default)]
+    return scheme, netloc
+
+
+def same_origin(request: Request) -> None:
+    """CSRF guard for owner writes (a dependency). The owner cookie is
+    SameSite=Strict; this is the second wall. Safe methods pass. Otherwise refuse
+    (403) when Sec-Fetch-Site is present and isn't same-origin/none, or when Origin
+    is present and isn't this site (scheme per _https, host per the Host header or
+    X-Forwarded-Host). Then require application/json (415): a cross-site form can't
+    send it without a CORS preflight, which this app never answers."""
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site.strip().lower() not in ("same-origin", "none"):
+        log.warning("refused %s %s: Sec-Fetch-Site %r", request.method, request.url.path, site)
+        raise HTTPException(403, CROSS_SITE_DETAIL)
+    origin = request.headers.get("origin")
+    if origin is not None:
+        scheme, sep, netloc = origin.strip().partition("://")
+        own_scheme = "https" if _https(request) else "http"
+        hosts = {request.headers.get("host", ""),
+                 request.headers.get("x-forwarded-host", "").split(",")[0]}
+        own = {_origin_key(own_scheme, h) for h in hosts if h.strip()}
+        if not sep or "/" in netloc or _origin_key(scheme, netloc) not in own:
+            log.warning("refused %s %s: Origin %r", request.method, request.url.path, origin)
+            raise HTTPException(403, CROSS_SITE_DETAIL)
+    ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        raise HTTPException(415, JSON_DETAIL)
+
+
 class Unlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
     pin: str = Field(min_length=1, max_length=64)
 
 
 def router(gate: OwnerGate) -> APIRouter:
-    r = APIRouter(prefix="/api/advanced")
+    r = APIRouter(prefix="/api/advanced", dependencies=[Depends(same_origin)])
 
     @r.post("/unlock")
     async def unlock(body: Unlock, request: Request, response: Response):

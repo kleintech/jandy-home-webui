@@ -619,9 +619,11 @@ def test_salt_boost_state_machine(client, cloud):
     assert client.post("/api/advanced/salt/boost", json={"action": "resume"}).status_code == 409
     assert [c for c, _ in swc_calls(cloud)].count("control_swc_boost") == 0
     assert client.post("/api/advanced/salt/boost", json={"action": "pause"}).status_code == 200
-    assert swc_calls(cloud)[-1] == ("control_swc_boost", {"boostcontrol": "pause"})
+    assert swc_calls(cloud)[-1] == ("control_swc_boost",
+                                    {"boosthrs": "24", "boostmode": "pool", "boostcontrol": "pause"})
     assert client.post("/api/advanced/salt/boost", json={"action": "stop"}).status_code == 200
-    assert swc_calls(cloud)[-1] == ("control_swc_boost", {"boostcontrol": "stop"})
+    assert swc_calls(cloud)[-1] == ("control_swc_boost",
+                                    {"boosthrs": "24", "boostmode": "pool", "boostcontrol": "stop"})
 
 
 @pytest.mark.parametrize("body", [{"action": "start", "hours": 25}, {"action": "start", "hours": 0},

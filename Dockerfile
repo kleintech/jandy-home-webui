@@ -23,4 +23,9 @@ COPY app ./app
 RUN mkdir -p /data && chown 1000:1000 /data
 USER 1000:1000
 EXPOSE 8080
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*'"]
+# --proxy-headers applies X-Forwarded-For/-Proto only from the addresses in
+# $FORWARDED_ALLOW_IPS (uvicorn's default: 127.0.0.1), never from any peer: a LAN
+# client must not choose its own address (the owner PIN rate limit keys on it).
+# The app reads X-Forwarded-Proto itself for the Secure cookie, and
+# OWNER_TRUSTED_PROXIES decides whose X-Forwarded-For the PIN limit believes.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers"]

@@ -188,7 +188,9 @@ def limit_problems(lim: Limits, names: dict[str, str] | None = None) -> list[str
     return [
         msg for bad, msg in [
             (lim.spa_min > lim.spa_max, f"{n['spa_min']} > {n['spa_max']}"),
-            (lim.min_spread < 0, f"{n['min_spread']} < 0"),
+            # At least 1: with 0, heat and chill could meet and the heat pump would
+            # heat and chill against itself.
+            (lim.min_spread < 1, f"{n['min_spread']} < 1"),
             (lim.pool_heat_min > lim.pool_heat_max, f"{n['pool_heat_min']} > {n['pool_heat_max']}"),
             (lim.pool_heat_min + lim.min_spread > lim.pool_chill_max,
              f"{n['pool_heat_min']} + {n['min_spread']} > {n['pool_chill_max']}"),
@@ -203,8 +205,8 @@ def check_document(cfg: AppConfig) -> AppConfig:
         v = getattr(lim, name)
         if not PANEL_MIN <= v <= PANEL_MAX:
             raise ConfigInvalid(f"limits.{name}: must be between {PANEL_MIN} and {PANEL_MAX}")
-    if not 0 <= lim.min_spread <= PANEL_MAX - PANEL_MIN:
-        raise ConfigInvalid(f"limits.min_spread: must be between 0 and {PANEL_MAX - PANEL_MIN}")
+    if not 1 <= lim.min_spread <= PANEL_MAX - PANEL_MIN:
+        raise ConfigInvalid(f"limits.min_spread: must be between 1 and {PANEL_MAX - PANEL_MIN}")
     problems = limit_problems(lim.to_limits(), {k: f"limits.{k}" for k in lim.model_dump()})
     if problems:
         raise ConfigInvalid("; ".join(problems))

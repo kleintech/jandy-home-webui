@@ -95,7 +95,8 @@ def create_app(service: PoolService | None = None, owner: owner_auth.OwnerGate |
         yield
         await svc.close()
 
-    app = FastAPI(title="Pool & Spa", lifespan=lifespan, docs_url=None, redoc_url=None)
+    # No /openapi.json: it would list every owner route and its body for anyone.
+    app = FastAPI(title="Pool & Spa", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
     async def call(coro):
         try:
@@ -164,14 +165,26 @@ def create_app(service: PoolService | None = None, owner: owner_auth.OwnerGate |
     def no_store(response: Response) -> None:
         response.headers["Cache-Control"] = "no-store"
 
-    @app.get("/api/config", dependencies=[Depends(no_store)])
-    async def get_config():
-        return config_store.public(svc().app_config())
+    owner_write = [Depends(owner_auth.same_origin), Depends(gate.require_owner), Depends(no_store)]
 
-    @app.put("/api/config", dependencies=[Depends(gate.require_owner), Depends(no_store)])
+    @app.get("/api/config", dependencies=[Depends(no_store)])
+    async def get_config(request: Request):
+        doc = config_store.public(svc().app_config())
+        if not (gate.enabled and gate.unlocked(request)):
+            # The weather location is the house's location: owners only. A copy
+            # marked redacted can't be saved back (see put_config).
+            doc["weather"] = {"label": doc["weather"].get("label", "")}
+            doc["redacted"] = True
+        return doc
+
+    @app.put("/api/config", dependencies=owner_write)
     async def put_config(request: Request, body: Any = Body(...)):
         s = svc()
         current = s.app_config()
+        if isinstance(body, dict) and body.get("redacted"):
+            # Edited from the guest copy (no weather location): saving it would
+            # wipe the location.
+            raise HTTPException(409, "Settings were loaded before unlocking; reload them")
         version = body.get("version") if isinstance(body, dict) else None
         if type(version) is not int:
             raise HTTPException(422, "version: required (the version of the settings being edited)")
@@ -189,9 +202,9 @@ def create_app(service: PoolService | None = None, owner: owner_auth.OwnerGate |
         except config_store.StorageUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
         log.info("settings saved (version %d) by owner from %s", saved.version, gate.client_id(request))
-        return config_store.public(saved)
+        return {**config_store.public(saved), "warnings": s.toggle_warnings(saved)}
 
-    @app.post("/api/config/reset", dependencies=[Depends(gate.require_owner), Depends(no_store)])
+    @app.post("/api/config/reset", dependencies=owner_write)
     async def reset_config(request: Request):
         s = svc()
         try:
@@ -215,7 +228,7 @@ def create_app(service: PoolService | None = None, owner: owner_auth.OwnerGate |
     app.include_router(weather.router)
     # Owner-only Advanced controls (unlock/lock first: they don't need a session).
     app.include_router(owner_auth.router(gate))
-    app.include_router(advanced.router(svc, gate.require_owner, call))
+    app.include_router(advanced.router(svc, gate.require_owner, call, owner_auth.same_origin))
     @app.middleware("http")
     async def revalidate_static(request, call_next):
         # Make browsers revalidate (ETag) every time, so a new index.html is never

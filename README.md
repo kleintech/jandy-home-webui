@@ -146,7 +146,7 @@ Secret on Kubernetes.
 | `SPA_MIN` / `SPA_MAX` | `80` / `103` | spa set point range |
 | `POOL_HEAT_MIN` | `82` | lowest pool heat set point (the low set point) |
 | `POOL_CHILL_MAX` | `92` | highest pool chill set point (the high set point; heat pumps with chill only) |
-| `POOL_MIN_SPREAD` | `5` | chill always stays at least this far above heat |
+| `POOL_MIN_SPREAD` | `5` | chill always stays at least this far above heat (at least 1) |
 | `POOL_HEAT_MAX` | `92` | highest heat set point. With a chiller, heat is also capped at chill max − spread |
 | `WEATHER_ZIP` | — | zip code for the weather card, looked up once at zippopotam.us |
 | `WEATHER_COUNTRY` | `us` | country code for `WEATHER_ZIP` (zippopotam.us supports about 60 countries) |
@@ -156,9 +156,10 @@ Secret on Kubernetes.
 | `POLL_SECONDS` | `15` | how often to poll iAqualink while someone has the page open |
 | `IDLE_SECONDS` | `60` | stop polling this long after the last page request |
 | `POOL_COVER_HINT` | `1` | `0` hides the "pool cover is closed" hint under the pool-mode toggles |
-| `OWNER_PIN` | — | **Secret.** 4-12 digits. Turns on the owner features (Advanced controls, changing Settings). Unset: they're off |
-| `OWNER_SECRET` | random at start-up | **Secret.** Signs the owner cookie. Without it, a restart logs the owner out |
-| `OWNER_TRUSTED_PROXIES` | — | comma-separated IPs/CIDRs of your reverse proxy, so PIN rate limiting sees the real client address |
+| `OWNER_PIN` | — | **Secret.** 6-12 digits (0-9). Turns on the owner features (Advanced controls, changing Settings). Unset or invalid: they're off (the log says why) |
+| `OWNER_SECRET` | random at start-up | **Secret.** Signs the owner cookie; at least 32 characters (`openssl rand -hex 32`), a shorter one is ignored with a warning. Without it, a restart logs the owner out |
+| `OWNER_TRUSTED_PROXIES` | — | comma-separated IPs/CIDRs of a reverse proxy that passes the real client address in `X-Forwarded-For`, so PIN rate limiting is per client. Leave it unset when every client reaches the app from the same address (k3s ServiceLB, see [Owner PIN](#owner-pin)) |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | uvicorn's own setting: peers whose `X-Forwarded-*` headers uvicorn applies. Leave it alone; the app reads `X-Forwarded-Proto` itself |
 | `CONFIG_PATH` | `/data/config.json` | where the Settings saved from the page are kept (see [Where settings are saved](#where-settings-are-saved)) |
 | `PORT` | `8080` | listen port inside the container |
 | `LOG_LEVEL` | `INFO` | log verbosity |
@@ -170,7 +171,7 @@ guest toggles and weather location replace them until a **Reset to defaults**.
 `WEATHER_TZ` always comes from the environment.
 
 The service refuses to start if the limits contradict each other, for example when
-`POOL_HEAT_MIN + POOL_MIN_SPREAD > POOL_CHILL_MAX`. If neither `WEATHER_ZIP` nor
+`POOL_HEAT_MIN + POOL_MIN_SPREAD > POOL_CHILL_MAX` or `POOL_MIN_SPREAD` is below 1. If neither `WEATHER_ZIP` nor
 `WEATHER_LAT` and `WEATHER_LON` are set, the weather card stays hidden and no weather
 data is fetched.
 
@@ -178,7 +179,7 @@ data is fetched.
 
 | Control | On the Jandy |
 |---|---|
-| **Hot Tub On** (Spa Mode) | Runs the Hot Tub On steps in order. By default: filter pump on (only if it's off), spa mode on, lower the spa set point to `SPA_MAX` if it's above, spa heat on. A failing step stops the run and the page says which ("Hot Tub On stopped at step 2 of 4 …"). |
+| **Hot Tub On** (Spa Mode) | Runs the Hot Tub On steps in order. By default: filter pump on (only if it's off), spa mode on, lower the spa set point to `SPA_MAX` if it's above, spa heat on. Every step is checked against the panel before anything is sent, and the panel is read again after each step, so the next step decides from what the previous one (say, a OneTouch scene) actually did. A failing step stops the run and the page says which ("Hot Tub On stopped at step 2 of 4 …"). The Hot Tub switch on the main page shows the panel's spa mode, so a custom Hot Tub On should include a `spa_pump on` step (or a scene that turns spa mode on), or the switch won't show On afterwards. |
 | **Hot Tub Off** (Pool Mode) | Runs the Hot Tub Off steps. By default: spa heat off, then spa mode off; the filter pump schedule and the pool heater or heat pump are left alone. |
 | **Light** | Turning it on always starts on white. Off is off. Relay color lights (Jandy, Pentair, Hayward) pick colors by switching power, so for those a note says the light may cycle on and off a few times. |
 | **Light color** | The light's own color list (Jandy WaterColors, Pentair, Hayward, …). The panel's white ("Alpine White", "Cloud White") is shown as **White**. |
@@ -214,7 +215,8 @@ When any Equipment status row is flagged, the gear (and the ☰ button and its
 
 ### Owner PIN
 
-Set `OWNER_PIN` (4-12 digits) to turn on the owner features. Without it, Advanced and the
+Set `OWNER_PIN` (6-12 digits, 0-9 only) to turn on the owner features. A shorter or
+otherwise invalid PIN leaves them off and the log says why. Without it, Advanced and the
 Settings forms say "Owner controls are off — set OWNER_PIN on the server" and Settings
 stay read-only.
 
@@ -223,7 +225,25 @@ sets an HttpOnly cookie on that browser for 30 days; the page never stores the P
 **Lock** ends it on that browser. Changing `OWNER_PIN` (or `OWNER_SECRET`) logs every owner
 out; without `OWNER_SECRET`, so does a restart. Wrong PINs are limited (5 per 5 minutes per
 client, 10 per 15 minutes overall); while limited, the page counts down until you can try
-again. Behind a reverse proxy, set `OWNER_TRUSTED_PROXIES` so the limit is per real client.
+again.
+
+The overall limit is a deliberate trade-off. Behind k3s ServiceLB (the default
+`externalTrafficPolicy: Cluster`), or any proxy that doesn't pass the real client address,
+every phone reaches the app from the same address, so the per-client limit can't tell
+guests apart and the overall limit is what actually holds. The cost: a guest who types
+wrong PINs can keep the owner from unlocking for up to about 15 minutes after their last
+attempt. Browsers that are already unlocked (the 30-day cookie) aren't affected. The gain:
+with a 6-digit PIN and 10 guesses per 15 minutes, trying every PIN takes about 3 years (and
+longer for longer PINs).
+
+`OWNER_TRUSTED_PROXIES` only helps when your proxy passes the real client address in
+`X-Forwarded-For` (and the proxy's own address is what the app sees). Behind k3s
+ServiceLB with `externalTrafficPolicy: Cluster` the address is already lost before Traefik
+sees it, so leave it unset there.
+
+Owner writes (unlock, lock, Save, Reset, every Advanced control) are refused when the
+browser says the request came from another site (`Sec-Fetch-Site`, `Origin`), and must be
+sent as JSON, so a page elsewhere can't drive them.
 
 ### Settings
 
@@ -237,8 +257,8 @@ a few seconds.
 | **Main page** | Which parts guests see: weather card, 6-hour forecast chart, swim rating, water/air temperature, Hot Tub On / Off buttons, light switch, light color, set temperatures, guest toggles. These only hide things on the page; the server doesn't enforce them |
 | **Temperature limits** | Spa lowest/highest, pool heat lowest/highest, pool chill highest, and how far chill stays above heat. Checked as you type with the server's rules (whole numbers, 34-104, lowest ≤ highest, heat lowest + spread ≤ chill highest) |
 | **Hot Tub On / Off** | The steps each button runs, in order (up to 12): switch a pump, heater, heat pump, aux or variable-speed pump on/off; turn a OneTouch scene on/off; turn a light on, optionally with an effect; or cap the spa set point (it only ever lowers it, and never above the spa limit's highest). Add, remove and reorder steps |
-| **Guest toggles** | Up to 20 switches for guests: a label, a device (aux circuits, lights and OneTouch scenes, plus the devices the `JANDY_*_DEVICE` mapping gave Bubbles, Spillover and Water Features), Pool and/or Spa mode, and which other toggles it can't be on with (always both ways) |
-| **Weather** | The zip code and the name on the weather card |
+| **Guest toggles** | Up to 20 switches for guests: a label, a device (aux circuits, lights and OneTouch scenes, plus the devices the `JANDY_*_DEVICE` mapping gave Bubbles, Spillover and Water Features), Pool and/or Spa mode, and which other toggles it can't be on with (always both ways). A device mapped to the filter pump, spa mode, spa heater or pool heater can never be a guest toggle (refused on Save, and at the switch). A OneTouch scene can, but Save warns you: a scene can switch pumps and heaters, and guests will be able to run it |
+| **Weather** | The zip code and the name on the weather card. Only the name is shown to guests: until you unlock, Settings shows the weather location blank, and the server never sends it to a locked browser |
 
 Device pickers list what the panel reports (key and label). If someone saves Settings
 elsewhere while you have unsaved changes, the page says so and offers **Reload** (your
@@ -252,7 +272,10 @@ In `CONFIG_PATH` (default `/data/config.json`), written atomically. If that dire
 writable, Save says "Settings storage isn't available" and the app keeps running on its
 defaults.
 
-- **Docker Compose:** `compose.yaml` mounts a named volume `pool-config` at `/data`.
+- **Docker Compose:** `compose.yaml` mounts a named volume `pool-config` at `/data`. When
+  upgrading an install from before Settings existed, run `git pull && docker compose up -d
+  --build`: `--build` rebuilds the image (which creates `/data` owned by the app user),
+  and `up` creates the volume.
 - **Kubernetes:** `k8s/` mounts a PersistentVolumeClaim named `pool-config-data` at `/data`.
   The `deploy/dev/` overlay uses an `emptyDir` instead, so its settings are lost whenever
   the pod is replaced.
@@ -336,7 +359,13 @@ In `/api/state` this is `"equipment": {"groups": [{"id", "title", "note", "rows"
 - **Double taps don't undo themselves.** For 20 seconds after a command, the server
   trusts what it sent over a cloud that hasn't caught up yet.
 - **Set point writes keep the spread.** Heat and chill are written in an order that keeps
-  chill at least `POOL_MIN_SPREAD` above heat, even if one of the two writes fails.
+  chill at least `POOL_MIN_SPREAD` above heat, even if one of the two writes fails. Set
+  points just written are trusted for the same 20 seconds, so changing one of them right
+  after the other is checked against the new value, not the one the cloud still reports.
+- **No reversing a change that hasn't landed.** Within those 20 seconds, asking for the
+  opposite of what was just sent (Bubbles off right after on, Hot Tub Off right after On)
+  is refused with "… is still changing; try again in a few seconds" rather than silently
+  doing nothing.
 - **It only polls while someone is looking.** Open pages ask the server for state every
   5 seconds; hidden tabs stop asking. The server polls iAqualink at most every
   `POLL_SECONDS`, and only if a page has asked within the last `IDLE_SECONDS`. When nobody
@@ -380,15 +409,16 @@ Don't expose the container port directly to the Internet.
 
 ## Deploying on Kubernetes
 
-`k8s/` is a kustomization (Deployment, Service, Ingress, ConfigMap) written for the
-author's home lab, which uses Traefik ingress, wildcard TLS from a default TLSStore, an
+`k8s/` is a kustomization (Deployment, Service, Ingress, ConfigMap, and a
+PersistentVolumeClaim `pvc.yaml` for saved Settings) written for the author's home lab, which uses Traefik ingress, wildcard TLS from a default TLSStore, an
 in-cluster registry and Argo CD. Copy it and change these for your cluster:
 
 | File | Change |
 |---|---|
 | `k8s/kustomization.yaml` | `images:` name and `newTag`: where you push the image |
 | `k8s/ingress.yaml` | `ingressClassName`, hosts, and TLS (`secretName` if you don't have a default certificate) |
-| `k8s/configmap.yaml` | your limits and `JANDY_*_DEVICE` mapping |
+| `k8s/configmap.yaml` | your limits and `JANDY_*_DEVICE` mapping (never the owner PIN or secret: this file is in git) |
+| `k8s/pvc.yaml` | `storageClassName`, if you don't want the cluster's default StorageClass |
 
 Then build, push and apply:
 
@@ -405,12 +435,28 @@ kubectl -n pool create secret generic iaqualink-credentials \
 kubectl -n pool apply -k k8s/
 ```
 
+To turn on the owner features, add `OWNER_PIN` and `OWNER_SECRET` to the same Secret (never
+to `configmap.yaml` or anything else in git), then restart the pod: the Secret is loaded
+with `envFrom`, and a changed Secret doesn't restart the pod by itself.
+
+```bash
+kubectl -n pool patch secret iaqualink-credentials --type merge \
+  -p "{\"stringData\":{\"OWNER_PIN\":\"<6-12 digits>\",\"OWNER_SECRET\":\"$(openssl rand -hex 32)\"}}"
+kubectl -n pool rollout restart deploy/pool
+```
+
 - **Any key in the Secret becomes a setting**, because the Secret is loaded with
   `envFrom`.
 - **Don't build the Secret with `--from-env-file` from a file whose values are quoted.**
   kubectl keeps the quotes, and iAqualink then rejects the password.
 - **Keep it at one replica.** The Deployment runs one replica with the `Recreate`
   strategy, as a non-root user, with a read-only root filesystem.
+- **Saved Settings live on the `pool-config-data` PVC** (64Mi, `ReadWriteOnce`, the
+  cluster's default StorageClass). The pod sets `fsGroup: 1000` so uid 1000 can write it,
+  but hostPath-based provisioners such as k3s `local-path` don't apply `fsGroup`; it works
+  there anyway because `local-path` creates its directories mode 0777. On another
+  provisioner, check that the pod can write `/data` (Save says "Settings storage isn't
+  available" if not). The PVC is annotated so Argo CD never prunes or deletes it.
 - **`deploy/dev/` is an overlay that always runs the mock backend.** It drops the Secret
   and forces `JANDY_BACKEND=mock`, so you can try changes without touching the pool:
   `kubectl kustomize deploy/dev | sed "s/:dev-image-tag/:<tag>/" | kubectl -n <dev-ns> apply -f -`
@@ -481,7 +527,7 @@ purpose, and rerun the tests when you do.
 | Red dot and "Can't reach the pool controller" | Wrong login (the log says "rejected the username/password"), the panel is offline in the iAqualink app, or there's no Internet connection |
 | A toggle says "try again" | The controller sent an incomplete update or is offline. The server refuses rather than guessing |
 | A guest toggle is missing | Its device isn't on the panel (default toggles come from the `JANDY_*_DEVICE` mapping; run `python -m app.discover`), it's set for the other mode, or Main page → Guest toggles is off. Check Settings → Guest toggles |
-| Advanced says "Owner controls are off" | `OWNER_PIN` isn't set, or isn't 4-12 digits (the log says so) |
+| Advanced says "Owner controls are off" | `OWNER_PIN` isn't set, or isn't 6-12 digits (the log says so) |
 | Save says "Settings storage isn't available" | `CONFIG_PATH`'s directory isn't writable; mount a volume at `/data` |
 | Set point changes refused on a °C panel | Set the `SPA_*` and `POOL_*` limits in °C |
 | Weather card missing | No `WEATHER_ZIP` or `WEATHER_LAT`/`WEATHER_LON` is set, or Open-Meteo is unreachable |

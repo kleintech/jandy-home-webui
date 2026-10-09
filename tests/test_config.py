@@ -234,7 +234,7 @@ def test_reset_deletes_the_file_and_returns_defaults(client, path):
     d = edited(client)
     d["limits"]["spa_max"] = 100
     put(client, d)
-    r = client.post("/api/config/reset")
+    r = client.post("/api/config/reset", json={})
     assert r.status_code == 200
     assert r.json()["limits"]["spa_max"] == 103
     assert r.json()["version"] == 2
@@ -309,12 +309,12 @@ def test_writes_need_the_owner(backend, path, method, url):
     with TestClient(create_app(svc, OwnerGate(PIN, b"secret"))) as c:
         body = doc(c)
         body["limits"]["spa_max"] = 104
-        r = getattr(c, method)(url, **({"json": body} if method == "put" else {}))
+        r = getattr(c, method)(url, json=body if method == "put" else {})
         assert r.status_code == 401
         assert doc(c)["limits"]["spa_max"] == 103
     svc2 = PoolService(MockBackend(), poll_seconds=3600, config=ConfigStore(path, Limits(), weather={}))
     with TestClient(create_app(svc2, OwnerGate(None))) as c:
-        r = getattr(c, method)(url, **({"json": body} if method == "put" else {}))
+        r = getattr(c, method)(url, json=body if method == "put" else {})
         assert r.status_code == 403
     assert not path.exists()
 
@@ -630,3 +630,17 @@ def test_store_refuses_a_stale_save_on_its_own(path):
     with pytest.raises(config_store.StaleVersion):
         store.save(first, 0)
     assert store.version == 1
+
+
+def test_zero_spread_is_refused_in_settings_and_env(client, monkeypatch):
+    # Bug: min_spread 0 let a guest set heat == chill, so the heat pump heats and
+    # chills against itself around one temperature.
+    d = edited(client)
+    d["limits"]["min_spread"] = 0
+    r = put(client, d)
+    assert r.status_code == 422
+    assert r.json()["detail"] == "limits.min_spread: must be between 1 and 70"
+    from app.main import limits_from_env
+    monkeypatch.setenv("POOL_MIN_SPREAD", "0")
+    with pytest.raises(SystemExit, match="POOL_MIN_SPREAD < 1"):
+        limits_from_env()

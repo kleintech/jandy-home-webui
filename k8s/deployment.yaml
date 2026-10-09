@@ -20,7 +20,10 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        # The image runs as uid 1000; make the settings volume writable for it.
+        # The image runs as uid 1000. fsGroup makes the settings volume group-owned
+        # by 1000 (group-writable) on provisioners that support it. hostPath-based
+        # ones like k3s local-path ignore fsGroup; there /data is writable only
+        # because local-path creates its directories mode 0777.
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch
       volumes:

@@ -12,6 +12,10 @@
  * - Settings: forms for GET /api/config, read-only until unlocked; one Save
  *   (PUT, whole document plus the version it was based on) and Reset to
  *   defaults. Device pickers list the panel's devices from GET /api/advanced.
+ *   Guests get the config without the weather location, so after every unlock
+ *   the owner's copy is fetched again and editing waits for it. While locked
+ *   the forms show the saved settings; an unsaved draft is kept in memory
+ *   (with a notice) until the owner unlocks again to save or discard it.
  *
  * Talks to app.js through window.PoolApp (state, config, subscribe, refresh).
  * Panel-provided labels are only ever set as text, never as HTML.
@@ -217,8 +221,8 @@
     const pin = input.value.trim();
     input.value = '';                 // the PIN never outlives this request
     if (unlocking || Date.now() < lockUntil) return;
-    if (!/^\d{4,12}$/.test(pin)) {
-      pinMsg = 'The owner PIN is 4 to 12 digits.';
+    if (!/^\d{6,12}$/.test(pin)) {
+      pinMsg = 'The owner PIN is 6 to 12 digits.';
       updatePinUi();
       input.focus();
       return;
@@ -230,6 +234,7 @@
       await req('POST', '/api/advanced/unlock', { pin }, GET_TIMEOUT_MS);
       unlocking = false;
       setOwner({ enabled: true, unlocked: true });
+      focusOwnerBox('.owner-state');   // the form that had focus is gone
       App.refresh();
       return;
     } catch (e) {
@@ -244,15 +249,28 @@
     if (again && !again.disabled && again.offsetParent) again.focus();
   }
 
+  /** Focus `sel` in the owner box of the section on screen (only if focus was
+   *  inside the sheet: the button or form that had it was just redrawn away). */
+  function focusOwnerBox(sel) {
+    const a = document.activeElement;
+    if (a && a !== document.body && dlg.contains(a) && a.isConnected) return;
+    for (const box of [$('set-owner'), $('adv-owner')]) {
+      const n = box && box.querySelector(sel);
+      if (n && n.offsetParent && !n.disabled) { n.focus(); return; }
+    }
+    if (dlg.open) $('settings-h').focus();
+  }
+
   let locking = false;
   async function lock(btn) {
     if (locking) return;
     locking = true;
     btn.disabled = true;
     try {
-      await req('POST', '/api/advanced/lock', null, GET_TIMEOUT_MS);
+      await req('POST', '/api/advanced/lock', {}, GET_TIMEOUT_MS);
       pinMsg = '';
       setOwner({ unlocked: false });
+      focusOwnerBox('.pin-input');     // the Lock button that had focus is gone
       App.refresh();
     } catch (e) {
       btn.disabled = false;
@@ -281,7 +299,7 @@
     }
     if (owner.unlocked) {
       box.append(h('div', { class: 'owner-bar' },
-        h('span', { class: 'owner-state' }, h('span', { class: 'owner-dot', 'aria-hidden': 'true' }), 'Owner unlocked'),
+        h('span', { class: 'owner-state', tabindex: '-1' }, h('span', { class: 'owner-dot', 'aria-hidden': 'true' }), 'Owner unlocked'),
         h('button', { type: 'button', class: 'btn-secondary btn-small', onclick: (e) => lock(e.currentTarget) }, 'Lock')));
       return;
     }
@@ -501,8 +519,8 @@
         const ok = await confirmAction({
           title: `Turn ${on ? 'ON' : 'OFF'} ${it.label}?`,
           body: danger || (it.kind === 'scene'
-            ? `Turns the OneTouch scene ${on ? 'on' : 'off'} on the panel.`
-            : `Switches ${it.label} (${it.key}) ${on ? 'on' : 'off'} on the panel.`),
+            ? `Turns the OneTouch scene ${on ? 'on' : 'off'} at the panel.`
+            : `Switches ${it.label} (${it.key}) ${on ? 'on' : 'off'} at the panel.`),
           ok: on ? 'Turn on' : 'Turn off', danger: !!danger,
         });
         if (ok) write(sec, 'sw:' + it.key, '/api/advanced/switch', { key: it.key, on });
@@ -906,7 +924,12 @@
 
   // ---------- Settings (app configuration) ----------
   let cfg = null;            // the server's document
+  let cfgFull = false;       // cfg came from an owner request (guests' copy leaves fields out)
+  let cfgLoadErr = null;     // why the owner's copy couldn't be fetched
+  let cfgSeq = 0;            // bumped to drop an owner config fetch that's no longer wanted
   let draft = null;          // the owner's working copy (no version)
+  let doc = null;            // what the forms show: the draft when unlocked, else the saved config
+  let saveWarnings = [];     // `warnings` from the last save / reset answer
   let baseVersion = null;    // version `draft` was taken from (sent with the PUT)
   let saving = false;
   let serverErr = null;      // { field, msg } from a 422
@@ -914,30 +937,66 @@
   let statusMsg = '';
   const newIds = new Set();  // guest toggle ids added in this draft (renamed with their label)
 
-  const strip = (doc) => { const d = clone(doc); delete d.version; return d; };
-  const isDirty = () => !!(draft && cfg) && JSON.stringify(draft) !== JSON.stringify(strip(cfg));
-  const editable = () => owner.enabled === true && owner.unlocked && !!cfg && !!draft && !saving;
+  /** A config document without its version / warnings, every section present. */
+  function normalize(src) {
+    const d = clone(src);
+    delete d.version;
+    delete d.warnings;
+    for (const k of ['main_page', 'limits', 'weather']) if (!d[k] || typeof d[k] !== 'object') d[k] = {};
+    for (const k of ['hot_tub_on', 'hot_tub_off', 'guest_toggles']) if (!Array.isArray(d[k])) d[k] = [];
+    return d;
+  }
+  const isDirty = () => !!(draft && cfg) && JSON.stringify(draft) !== JSON.stringify(normalize(cfg));
+  const ownerIn = () => owner.enabled === true && owner.unlocked;
+  const editable = () => ownerIn() && !!cfg && cfgFull && !!draft && !saving;
 
   function resetDraft() {
-    draft = cfg ? strip(cfg) : null;
-    for (const k of ['main_page', 'limits', 'weather']) if (draft && (!draft[k] || typeof draft[k] !== 'object')) draft[k] = {};
-    for (const k of ['hot_tub_on', 'hot_tub_off', 'guest_toggles']) if (draft && !Array.isArray(draft[k])) draft[k] = [];
+    draft = cfg ? normalize(cfg) : null;
     baseVersion = cfg ? cfg.version : null;
     serverErr = null;
     topMsg = null;
+    saveWarnings = [];
     newIds.clear();
   }
 
-  function onConfig(c) {
-    if (!c) return;
-    if (cfg && c.version === cfg.version) return;
+  /** A config from app.js (`full` false: maybe a guest's copy) or from an owner request. */
+  function onConfig(c, full) {
+    if (!c || typeof c.version !== 'number') return;
+    const same = !!cfg && c.version === cfg.version;
+    if (same && (cfgFull || !full)) return;
     const dirty = isDirty();
     cfg = c;
+    cfgFull = !!full;
     if (!draft || !dirty) { resetDraft(); statusMsg = ''; }
-    else if (c.version !== baseVersion) {
+    else if (same) {
+      // The owner's copy of the version the draft came from: add the fields
+      // the guest copy left out, without touching the owner's edits.
+      for (const k of ['main_page', 'limits', 'weather']) {
+        if (c[k] && typeof c[k] === 'object') for (const [f, v] of Object.entries(c[k])) if (!(f in draft[k])) draft[k][f] = v;
+      }
+    } else if (c.version !== baseVersion) {
       topMsg = { text: 'These settings were changed somewhere else. Reload to see them (your unsaved changes here will be lost).', reload: true };
     }
     renderSettings(true);
+    if (!cfgFull && ownerIn()) loadOwnerConfig();
+  }
+
+  /** GET /api/config as the owner (the cookie makes it the full document). */
+  async function loadOwnerConfig() {
+    if (!ownerIn()) return;
+    const seq = ++cfgSeq;
+    cfgLoadErr = null;
+    try {
+      const c = await req('GET', '/api/config', null, GET_TIMEOUT_MS);
+      if (seq !== cfgSeq || !ownerIn()) return;
+      if (typeof c.version !== 'number') throw Object.assign(new Error('Unexpected response from the server'), { status: 0 });
+      if (cfg && c.version < cfg.version) return;   // app.js has a newer one; its arrival refetches
+      onConfig(c, true);
+    } catch (e) {
+      if (seq !== cfgSeq) return;
+      if (e.status === 401 || e.status === 403) ownerLost(e.status);
+      else { cfgLoadErr = e.message; renderSettings(); }
+    }
   }
 
   // ----- devices for the pickers (from GET /api/advanced) -----
@@ -994,8 +1053,8 @@
     for (const [k] of LIMITS) {
       const v = L[k];
       if (!isInt(v)) e['limits.' + k] = 'Enter a whole number.';
-      else if (k === 'min_spread' ? v < 0 || v > PANEL_MAX - PANEL_MIN : v < PANEL_MIN || v > PANEL_MAX) {
-        e['limits.' + k] = k === 'min_spread' ? `Between 0 and ${PANEL_MAX - PANEL_MIN}.` : `Between ${PANEL_MIN} and ${PANEL_MAX}.`;
+      else if (k === 'min_spread' ? v < 1 || v > PANEL_MAX - PANEL_MIN : v < PANEL_MIN || v > PANEL_MAX) {
+        e['limits.' + k] = k === 'min_spread' ? `Between 1 and ${PANEL_MAX - PANEL_MIN}.` : `Between ${PANEL_MIN} and ${PANEL_MAX}.`;
       }
     }
     const ok = (k) => !e['limits.' + k];
@@ -1059,6 +1118,22 @@
     return null;
   }
 
+  function warnSlot(path) {
+    return h('p', { class: 'field-warn', 'data-warn': path, role: 'status', hidden: true });
+  }
+
+  /** Non-blocking advice: a Hot Tub list that never switches spa mode. */
+  function hotTubWarning(listName) {
+    if (!editable()) return '';
+    const on = listName === 'hot_tub_on';
+    const steps = draft[listName];
+    if (steps.some((s) => s.action === 'switch' && s.key === 'spa_pump' && (s.on !== false) === on)) return '';
+    const spa = devLabel('spa_pump') || 'Spa mode';
+    return on
+      ? `The Hot Tub switch shows spa mode from the panel; without '${spa} on' it will stay on Hot Tub Off.`
+      : `The Hot Tub switch shows spa mode from the panel; without '${spa} off' it will stay on Hot Tub On.`;
+  }
+
   function errSlot(path) {
     return h('p', { class: 'field-err', 'data-err': path, role: 'alert', hidden: true });
   }
@@ -1075,6 +1150,11 @@
         const inp = field.matches('input, select') ? field : field.querySelector('input, select');
         if (inp) { if (msg) inp.setAttribute('aria-invalid', 'true'); else inp.removeAttribute('aria-invalid'); }
       }
+    }
+    for (const n of setView.querySelectorAll('[data-warn]')) {
+      const msg = hotTubWarning(n.dataset.warn);
+      if (n.textContent !== msg) n.textContent = msg;
+      n.hidden = !msg;
     }
     return errs;
   }
@@ -1096,15 +1176,26 @@
         : dirty ? 'Unsaved changes.' : statusMsg;
     const top = $('set-top');
     top.textContent = '';
-    const text = topMsg ? topMsg.text : serverErr && !serverErr.field ? serverErr.msg : '';
+    const loadErr = ownerIn() && !cfgFull && cfgLoadErr ? `Couldn't load the settings for editing: ${cfgLoadErr}` : '';
+    const text = topMsg ? topMsg.text : serverErr && !serverErr.field ? serverErr.msg : loadErr
+      || (saveWarnings.length && !dirty ? 'Saved, but check this:' : '');
     top.hidden = !text;
     if (text) {
       top.append(h('span', { text }));
       if (topMsg && topMsg.reload) {
         top.append(h('button', { type: 'button', class: 'btn-secondary btn-small', onclick: () => { resetDraft(); statusMsg = ''; renderSettings(true); } }, 'Reload'));
+      } else if (!topMsg && !serverErr && loadErr) {
+        top.append(h('button', { type: 'button', class: 'btn-secondary btn-small', onclick: () => { cfgLoadErr = null; updateActions(); loadOwnerConfig(); } }, 'Try again'));
+      } else if (!topMsg && !serverErr && !loadErr) {
+        top.append(h('ul', { class: 'set-top-list' }, saveWarnings.map((w) => h('li', { text: w }))));
       }
     }
+    // A draft kept from an owner session that ended (or was locked).
+    lockNote.textContent = 'Unsaved changes — unlock to save or discard.';
+    lockNote.hidden = !(owner.enabled === true && !owner.unlocked && dirty);
   }
+  const lockNote = h('p', { class: 'lock-note', role: 'status', hidden: true });
+  $('set-owner').after(lockNote);
 
   function changed() {
     statusMsg = '';
@@ -1121,7 +1212,7 @@
       temps: 'Water and air temperature', mode_switch: 'Hot Tub On / Off buttons', light: 'Light switch',
       light_color: 'Light color', setpoints: 'Set temperatures', toggles: 'Guest toggles',
     };
-    const mp = draft.main_page;
+    const mp = doc.main_page;
     return [
       h('p', { class: 'note', text: 'What guests see on the main page.' }),
       h('div', { class: 'chk-group' }, Object.keys(mp).map((k) => h('label', { class: 'check' },
@@ -1142,14 +1233,14 @@
   }
 
   function limitsForm(ro) {
-    const L = draft.limits;
+    const L = doc.limits;
     return [
       h('p', { class: 'note', text: `The ranges guests can pick on the main page (${unit()}). The server enforces them too.` }),
       h('div', { class: 'limits-grid' }, LIMITS.map(([k, label]) => h('div', { class: 'lim' },
         h('label', { class: 'field-label', for: 'lim-' + k, text: label }),
         h('div', { class: 'num-unit' },
           numInput('lim:' + k, L[k], ro, (v) => { L[k] = v; },
-            { id: 'lim-' + k, min: k === 'min_spread' ? '0' : String(PANEL_MIN), max: String(PANEL_MAX) }),
+            { id: 'lim-' + k, min: k === 'min_spread' ? '1' : String(PANEL_MIN), max: String(PANEL_MAX) }),
           h('span', { class: 'unit-suffix', text: '°' })),
         errSlot('limits.' + k)))),
       errSlot('limits'),
@@ -1167,7 +1258,8 @@
     return { action, key: firstKey(action, step.key), on: step.on !== false };
   }
 
-  function moveBtns(list, i, label, ro, onRemove) {
+  /** ↑ ↓ ✕ for row `i`; `name` says which row in their accessible names. */
+  function moveBtns(list, i, label, ro, onRemove, name) {
     if (ro) return null;
     const move = (d) => {
       const j = i + d;
@@ -1177,16 +1269,17 @@
       renderForms(`${label}:${j}:${d < 0 ? 'up' : 'down'}`);
     };
     return h('div', { class: 'row-btns' },
-      h('button', { type: 'button', class: 'mini-btn', 'data-fid': `${label}:${i}:up`, disabled: i === 0, 'aria-label': 'Move up', title: 'Move up', onclick: () => move(-1) }, '↑'),
-      h('button', { type: 'button', class: 'mini-btn', 'data-fid': `${label}:${i}:down`, disabled: i === list.length - 1, 'aria-label': 'Move down', title: 'Move down', onclick: () => move(1) }, '↓'),
-      h('button', { type: 'button', class: 'mini-btn mini-del', 'aria-label': 'Remove', title: 'Remove', onclick: onRemove }, '✕'));
+      h('button', { type: 'button', class: 'mini-btn', 'data-fid': `${label}:${i}:up`, 'data-name-fmt': 'Move %s up', disabled: i === 0, 'aria-label': `Move ${name} up`, title: 'Move up', onclick: () => move(-1) }, '↑'),
+      h('button', { type: 'button', class: 'mini-btn', 'data-fid': `${label}:${i}:down`, 'data-name-fmt': 'Move %s down', disabled: i === list.length - 1, 'aria-label': `Move ${name} down`, title: 'Move down', onclick: () => move(1) }, '↓'),
+      h('button', { type: 'button', class: 'mini-btn mini-del', 'data-name-fmt': 'Remove %s', 'aria-label': `Remove ${name}`, title: 'Remove', onclick: onRemove }, '✕'));
   }
 
   function stepRow(listName, steps, i, ro) {
     const s = steps[i];
     const fid = (x) => `${listName}.${i}.${x}`;
     const n = i + 1;
-    const typeSel = select({ 'data-fid': fid('action'), disabled: ro, 'aria-label': `Step ${n} type`,
+    const nm = `${listName === 'hot_tub_on' ? 'Hot Tub On' : 'Hot Tub Off'} step ${n}`;
+    const typeSel = select({ 'data-fid': fid('action'), disabled: ro, 'aria-label': `${nm} type`,
       onchange: (e) => { steps[i] = retype(s, e.currentTarget.value); changed(); renderForms(fid('action')); } },
     STEP_TYPES.some(([v]) => v === s.action) ? STEP_TYPES : [[s.action, String(s.action)], ...STEP_TYPES], s.action);
     let detail;
@@ -1194,11 +1287,11 @@
       detail = h('div', { class: 'step-detail' },
         h('span', { class: 'step-text', text: 'Lower the spa set point to at most (only ever lowers it; the spa limit\'s highest still applies)' }),
         h('div', { class: 'num-unit' },
-          numInput(fid('value'), s.value, ro, (v) => { s.value = v; }, { min: String(PANEL_MIN), max: String(PANEL_MAX), 'aria-label': `Step ${n} spa set point cap` }),
+          numInput(fid('value'), s.value, ro, (v) => { s.value = v; }, { min: String(PANEL_MIN), max: String(PANEL_MAX), 'aria-label': `${nm} spa set point cap` }),
           h('span', { class: 'unit-suffix', text: '°' })));
     } else {
       const kind = s.action === 'light' ? 'light' : s.action === 'scene' ? 'scene' : 'switch';
-      const dev = select({ 'data-fid': fid('key'), disabled: ro, 'aria-label': `Step ${n} device`,
+      const dev = select({ 'data-fid': fid('key'), disabled: ro, 'aria-label': `${nm} device`,
         onchange: (e) => { s.key = e.currentTarget.value; if (s.action === 'light') s.effect = null; changed(); if (s.action === 'light') renderForms(fid('key')); } },
       devOptions(kind, s.key), s.key);
       let second;
@@ -1207,10 +1300,10 @@
         const effects = l && Array.isArray(l.effects) ? l.effects : [];
         const opts = [['', 'On (keep its effect)'], ...effects.map((x) => [x, `On, ${x}`])];
         if (s.effect && !effects.includes(s.effect)) opts.push([s.effect, `On, ${s.effect}`]);
-        second = select({ 'data-fid': fid('effect'), disabled: ro, 'aria-label': `Step ${n} light effect`,
+        second = select({ 'data-fid': fid('effect'), disabled: ro, 'aria-label': `${nm} light effect`,
           onchange: (e) => { s.effect = e.currentTarget.value || null; changed(); } }, opts, s.effect || '');
       } else {
-        second = select({ 'data-fid': fid('on'), disabled: ro, class: 'onoff', 'aria-label': `Step ${n} on or off`,
+        second = select({ 'data-fid': fid('on'), disabled: ro, class: 'onoff', 'aria-label': `${nm} on or off`,
           onchange: (e) => { s.on = e.currentTarget.value === 'on'; changed(); } }, [['on', 'On'], ['off', 'Off']], s.on === false ? 'off' : 'on');
       }
       detail = h('div', { class: 'step-detail' }, dev, second);
@@ -1218,14 +1311,14 @@
     return h('li', { class: 'step' },
       h('div', { class: 'step-head' },
         h('span', { class: 'step-n', text: n + '.' }), typeSel,
-        moveBtns(steps, i, listName, ro, () => { steps.splice(i, 1); changed(); renderForms(`${listName}:add`); })),
+        moveBtns(steps, i, listName, ro, () => { steps.splice(i, 1); changed(); renderForms(`${listName}:add`); }, nm)),
       detail,
       errSlot(`${listName}.${i}`));
   }
 
   function hottubForm(ro) {
     const block = (listName, title, note) => {
-      const steps = draft[listName];
+      const steps = doc[listName];
       return h('div', { class: 'steps-block' },
         h('h4', { class: 'adv-sub-title', text: title }),
         h('p', { class: 'note', text: note }),
@@ -1239,7 +1332,8 @@
             renderForms(`${listName}.${steps.length - 1}.action`);
           },
         }, steps.length >= MAX_STEPS ? `${MAX_STEPS} steps at most` : '+ Add step'),
-        errSlot(listName));
+        errSlot(listName),
+        warnSlot(listName));
     };
     return [
       block('hot_tub_on', 'Hot Tub On', 'Run in this order when a guest taps Hot Tub On. A switch already in the right state is left alone.'),
@@ -1275,16 +1369,21 @@
   }
 
   function togglesForm(ro) {
-    const list = draft.guest_toggles;
+    const list = doc.guest_toggles;
     const cards = list.map((t, i) => {
       const p = `guest_toggles.${i}`;
       const others = list.filter((o) => o !== t);
       const conflicts = new Set(Array.isArray(t.conflicts) ? t.conflicts : []);
+      // Every card has the same field names, so each control's accessible name
+      // says which toggle it belongs to ("Bubbles device", "Move Bubbles up").
+      const nm = () => squash(t.label) || `Toggle ${i + 1}`;
       const labelIn = h('input', {
         type: 'text', id: `gt-${i}-label`, 'data-fid': `${p}.label`, maxlength: '30', autocomplete: 'off',
-        value: t.label || '', disabled: ro,
+        value: t.label || '', disabled: ro, 'aria-label': `Guest toggle ${i + 1} label`,
         oninput: (e) => {
           t.label = e.currentTarget.value;
+          const card = e.currentTarget.closest('.tg-card');
+          for (const n of card.querySelectorAll('[data-name-fmt]')) n.setAttribute('aria-label', n.dataset.nameFmt.replace('%s', nm()));
           if (newIds.has(t.id)) { renameToggle(t, t.label); const idn = $(`gt-${i}-id`); if (idn) idn.textContent = `id: ${t.id}`; }
           // The other cards name this toggle in their "Can't be on with" lists.
           for (const sp of setView.querySelectorAll('.cf-name')) if (sp.tg === t) sp.textContent = t.label || t.id;
@@ -1302,11 +1401,12 @@
             newIds.delete(t.id);
             changed();
             renderForms('guest_toggles:add');
-          })),
+          }, nm())),
         h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Device' }),
-          select({ 'data-fid': `${p}.key`, disabled: ro, onchange: (e) => { t.key = e.currentTarget.value; changed(); } }, devOptions('toggle', t.key), t.key),
+          select({ 'data-fid': `${p}.key`, disabled: ro, 'data-name-fmt': '%s device', 'aria-label': `${nm()} device`,
+            onchange: (e) => { t.key = e.currentTarget.value; changed(); } }, devOptions('toggle', t.key), t.key),
           errSlot(p + '.key')),
-        h('fieldset', { class: 'chk-set' },
+        h('fieldset', { class: 'chk-set', 'data-name-fmt': '%s: shown in', 'aria-label': `${nm()}: shown in` },
           h('legend', { class: 'field-label', text: 'Shown in' }),
           h('div', { class: 'chk-group chk-inline' }, [['pool', 'Pool mode'], ['spa', 'Spa mode']].map(([m, ml]) => h('label', { class: 'check' },
             h('input', { type: 'checkbox', 'data-fid': `${p}.mode.${m}`, checked: Array.isArray(t.modes) && t.modes.includes(m), disabled: ro,
@@ -1318,7 +1418,7 @@
               } }),
             h('span', { text: ml })))),
           errSlot(p + '.modes')),
-        others.length ? h('fieldset', { class: 'chk-set' },
+        others.length ? h('fieldset', { class: 'chk-set', 'data-name-fmt': "%s: can't be on with", 'aria-label': `${nm()}: can't be on with` },
           h('legend', { class: 'field-label', text: "Can't be on with" }),
           h('div', { class: 'chk-group chk-inline' }, others.map((o) => h('label', { class: 'check' },
             h('input', { type: 'checkbox', 'data-fid': `${p}.cf.${o.id}`, checked: conflicts.has(o.id), disabled: ro,
@@ -1345,11 +1445,12 @@
   }
 
   function weatherForm(ro) {
-    const w = draft.weather;
+    const w = doc.weather;
     const field = (k, label, extra) => h('label', { class: 'field' },
       h('span', { class: 'field-label', text: label }),
       h('input', { type: 'text', 'data-fid': 'w:' + k, value: w[k] == null ? '' : String(w[k]), disabled: ro,
         autocomplete: 'off', spellcheck: 'false', ...(extra || {}),
+        ...(!(k in w) && !ownerIn() ? { placeholder: 'Shown to the owner only' } : {}),
         oninput: (e) => {
           const v = e.currentTarget.value.trim();
           w[k] = k === 'zip' ? (v || null) : v;   // the server stores "no zip" as null
@@ -1372,7 +1473,9 @@
     const active = document.activeElement;
     const keep = focusFid || (active && setView.contains(active) ? active.dataset.fid : null);
     const ro = !editable();
-    if (!cfg || !draft) {
+    // Locked: the saved settings, never a draft left from an owner session.
+    doc = ownerIn() ? draft : cfg ? normalize(cfg) : null;
+    if (!cfg || !doc) {
       const st = App.state();
       const msg = st && typeof st.config_version === 'number' ? 'Loading settings…'
         : "This server doesn't support changing settings yet.";
@@ -1405,7 +1508,7 @@
 
   function renderSettings(force) {
     renderOwnerBox($('set-owner'), 'set');
-    const sig = JSON.stringify([cfg && cfg.version, baseVersion, editable(), devSig(), !!cfg]);
+    const sig = JSON.stringify([cfg && cfg.version, baseVersion, editable(), ownerIn(), cfgFull, devSig(), !!cfg]);
     if (force || sig !== formSig) {
       formSig = sig;
       renderForms();
@@ -1420,7 +1523,9 @@
     if (e.status === 409) {
       topMsg = { text: 'These settings were changed somewhere else, so yours weren\'t saved. Reload to see them (your unsaved changes here will be lost).', reload: true };
     } else if (e.status === 422) {
-      serverErr = { field: fieldOf(e.message), msg: e.message };
+      const field = fieldOf(e.message);
+      // Shown under that field, so the path ("guest_toggles.1.label: ") would only repeat it.
+      serverErr = { field, msg: field ? e.message.replace(/^[\w.]+:\s*/, '') : e.message };
     } else if (e.status === 503) {
       serverErr = { field: null, msg: "Settings storage isn't available, so nothing was saved. The app keeps running on its current settings." };
     } else {
@@ -1428,11 +1533,13 @@
     }
   }
 
-  function adopt(doc, msg) {
-    cfg = doc;
+  function adopt(saved, msg) {
+    cfg = saved;
+    cfgFull = true;           // the answer to an owner request
     resetDraft();
     statusMsg = msg;
-    App.adoptConfig(doc);   // the main page follows right away
+    saveWarnings = Array.isArray(saved.warnings) ? saved.warnings.filter((w) => typeof w === 'string' && w) : [];
+    App.adoptConfig(saved);   // the main page follows right away
   }
 
   $('set-save').addEventListener('click', async () => {
@@ -1445,18 +1552,20 @@
     body.weather.label = squash(body.weather.label);
     renderSettings();
     try {
-      const doc = await req('PUT', '/api/config', body, POST_TIMEOUT_MS);
+      const saved = await req('PUT', '/api/config', body, POST_TIMEOUT_MS);
       saving = false;
-      adopt(doc, 'Saved.');
+      adopt(saved, 'Saved.');
     } catch (e) {
       saving = false;
       saveFailed(e);
     }
     renderSettings(true);
-    if (serverErr && serverErr.field) {
+    if (!ownerIn()) {
+      $('set-owner').scrollIntoView({ block: 'start' });   // the PIN form and the kept-draft notice
+    } else if (serverErr && serverErr.field) {
       const n = setView.querySelector(`[data-err="${CSS.escape(serverErr.field)}"]`);
       if (n) n.scrollIntoView({ block: 'center' });
-    } else if (serverErr || topMsg) {
+    } else if (serverErr || topMsg || saveWarnings.length) {
       $('set-top').scrollIntoView({ block: 'center' });
     }
   });
@@ -1480,9 +1589,9 @@
     topMsg = null;
     renderSettings();
     try {
-      const doc = await req('POST', '/api/config/reset', null, POST_TIMEOUT_MS);
+      const saved = await req('POST', '/api/config/reset', {}, POST_TIMEOUT_MS);
       saving = false;
-      adopt(doc, 'Back to the defaults.');
+      adopt(saved, 'Back to the defaults.');
     } catch (e) {
       saving = false;
       saveFailed(e);
@@ -1492,6 +1601,8 @@
 
   // ---------- wiring ----------
   function onOwnerChange() {
+    if (ownerIn()) { cfgFull = false; loadOwnerConfig(); }
+    else { cfgSeq += 1; cfgLoadErr = null; }
     if (!owner.unlocked) {
       adv = null;
       advError = null;

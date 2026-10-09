@@ -6,8 +6,11 @@
  *   Settings (default; app configuration + QR codes), Advanced (owner
  *   controls) and Equipment status. The header names the current section and
  *   takes focus when one is picked. Escape closes an open menu first.
- * - Equipment status, Settings and Advanced content are drawn by app.js on
- *   every poll; this file only shows and hides them.
+ * - Equipment status is drawn by app.js on every poll; Settings (the app
+ *   configuration forms) and Advanced are drawn by owner.js. This file only
+ *   shows and hides the sections, apart from the QR codes below.
+ * - Tab / Shift+Tab cycle through the sheet's own controls: the scrolling
+ *   <dialog> itself is never a tab stop.
  * - QR codes: builds "open the pool page" and "join the Wi-Fi" codes in the
  *   browser with the vendored qrcode-generator (no network calls), and prints a
  *   sign with them. Nothing typed here is sent to the server or stored: there is
@@ -21,6 +24,10 @@
   var dlg = $("settings");
   var closeBtn = $("settings-close");
   if (!btn || !dlg) return;
+
+  // A scrolling element is a tab stop in Chromium (keyboard scrolling), so
+  // Shift+Tab from the first control would land on the <dialog> box itself.
+  dlg.setAttribute("tabindex", "-1");
 
   // ---------- open / close ----------
   var menuBtn = $("settings-menu-btn");
@@ -95,6 +102,27 @@
   }, true);
   menu.addEventListener("focusout", function (e) {
     if (menuOpen() && e.relatedTarget && !menu.contains(e.relatedTarget) && e.relatedTarget !== menuBtn) closeMenu(false);
+  });
+
+  // Keep Tab inside the sheet: wrap from the last control to the first and back.
+  var FOCUSABLE = 'button, input, select, textarea, summary, a[href], [tabindex]:not([tabindex="-1"])';
+  function tabStops() {
+    return Array.prototype.filter.call(dlg.querySelectorAll(FOCUSABLE), function (n) {
+      return !n.disabled && n.getClientRects().length > 0 && !n.closest("[hidden], [inert]")
+        && getComputedStyle(n).visibility !== "hidden";
+    });
+  }
+  dlg.addEventListener("keydown", function (e) {
+    if (e.key !== "Tab" || e.altKey || e.ctrlKey || e.metaKey) return;
+    var stops = tabStops();
+    if (!stops.length) return;
+    var first = stops[0];
+    var last = stops[stops.length - 1];
+    var cur = document.activeElement;
+    // Focus on the box itself (or lost to <body>) counts as "before the first".
+    var onBox = cur === dlg || !dlg.contains(cur);
+    if (e.shiftKey && (cur === first || onBox)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (cur === last || onBox)) { e.preventDefault(); first.focus(); }
   });
 
   function open() {
