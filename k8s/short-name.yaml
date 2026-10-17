@@ -1,0 +1,37 @@
+# Short LAN name: someone on the Wi-Fi types `pool/` (or http://pool) and lands on
+# https://pool.lab.kleincogroup.com. No trusted certificate can cover a bare name, so this
+# answers plain HTTP only, and only with a redirect. Needs a LAN DNS record `pool` -> the
+# Traefik node. Traefik-specific (IngressRoute/Middleware CRDs); drop this file from
+# kustomization.yaml if you don't use Traefik or don't want a short name.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: pool-short-name
+  labels:
+    app.kubernetes.io/name: pool
+spec:
+  redirectRegex:
+    regex: ^https?://[^/]+/?(.*)
+    replacement: https://pool.lab.kleincogroup.com/${1}
+    # 302, not 301: browsers cache a permanent redirect indefinitely.
+    permanent: false
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: pool-short-name
+  labels:
+    app.kubernetes.io/name: pool
+spec:
+  entryPoints: [web]
+  routes:
+    - match: Host(`pool`)
+      kind: Rule
+      # Must beat the web entrypoint's blanket HTTP->HTTPS redirect (priority 10000 in the
+      # author's lab), or http://pool/ goes to https://pool/ and fails the cert check.
+      priority: 20000
+      middlewares:
+        - name: pool-short-name
+      services:
+        - name: pool
+          port: 80
