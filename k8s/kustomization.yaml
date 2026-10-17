@@ -1,4 +1,4 @@
-# `kubectl -n dev-jandy-home-webui apply -k k8s/` (dev) or Argo CD (prod). No namespace here.
+# Prod (Argo CD or `kubectl -n pool apply -k k8s/`); dev uses deploy/dev. No namespace here.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

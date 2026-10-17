@@ -1,7 +1,10 @@
 # Short LAN name: someone on the Wi-Fi types `pool/` (or http://pool) and lands on
 # https://pool.lab.kleincogroup.com. No trusted certificate can cover a bare name, so this
 # answers plain HTTP only, and only with a redirect. Needs a LAN DNS record `pool` -> the
-# Traefik node. Traefik-specific (IngressRoute/Middleware CRDs); drop this file from
+# Traefik node, added only AFTER this route answers 302 (until then the lab's blanket
+# HTTP->HTTPS 301 to https://pool/ applies, and browsers cache it for good):
+#   curl -sI -H 'Host: pool' http://<traefik-node>/
+# Traefik-specific (IngressRoute/Middleware CRDs); drop this file from
 # kustomization.yaml if you don't use Traefik or don't want a short name.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -32,6 +35,7 @@ spec:
       priority: 20000
       middlewares:
         - name: pool-short-name
+      # Never reached (the middleware always redirects), so don't depend on the app's pods.
       services:
-        - name: pool
-          port: 80
+        - name: noop@internal
+          kind: TraefikService
