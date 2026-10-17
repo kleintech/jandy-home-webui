@@ -399,8 +399,9 @@ for access from outside. Good options:
 
 - **Cloudflare Tunnel + Cloudflare Access** (free tier). No open ports, and a login page
   (one-time email PIN, Google, and others) in front of a public hostname. Don't make your
-  LAN DNS answer that hostname with your server's address: Cloudflare's DNS still hands
-  out its Encrypted ClientHello config for it, and Chrome at home then fails with
+  LAN DNS answer that hostname with your server's address: a resolver that answers only
+  the A record locally (UniFi's does) still passes along Cloudflare's Encrypted
+  ClientHello config for it, and Chrome at home then fails with
   `ERR_ECH_FALLBACK_CERTIFICATE_INVALID`. Give the LAN its own hostname instead.
 - **Tailscale, WireGuard or your router's VPN.** Your phone reaches your LAN as if you
   were at home.
