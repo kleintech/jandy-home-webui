@@ -398,8 +398,11 @@ Keep the app itself unauthenticated on your LAN, and put authentication in front
 for access from outside. Good options:
 
 - **Cloudflare Tunnel + Cloudflare Access** (free tier). No open ports, and a login page
-  (one-time email PIN, Google, and others) in front of a public hostname. If your LAN DNS
-  resolves the same hostname straight to your server, people at home skip the login.
+  (one-time email PIN, Google, and others) in front of a public hostname. Don't make your
+  LAN DNS answer that hostname with your server's address: a resolver that answers only
+  the A record locally (UniFi's does) still passes along Cloudflare's Encrypted
+  ClientHello config for it, and Chrome at home then fails with
+  `ERR_ECH_FALLBACK_CERTIFICATE_INVALID`. Give the LAN its own hostname instead.
 - **Tailscale, WireGuard or your router's VPN.** Your phone reaches your LAN as if you
   were at home.
 - **A reverse proxy with authentication**, such as Authelia, oauth2-proxy, or Traefik or
@@ -417,6 +420,7 @@ in-cluster registry and Argo CD. Copy it and change these for your cluster:
 |---|---|
 | `k8s/kustomization.yaml` | `images:` name and `newTag`: where you push the image |
 | `k8s/ingress.yaml` | `ingressClassName`, hosts, and TLS (`secretName` if you don't have a default certificate) |
+| `k8s/short-name.yaml` | the short LAN name (`http://pool/` redirects to the HTTPS host) and its target; Traefik-only, so remove it from `kustomization.yaml` otherwise |
 | `k8s/configmap.yaml` | your limits and `JANDY_*_DEVICE` mapping (never the owner PIN or secret: this file is in git) |
 | `k8s/pvc.yaml` | `storageClassName`, if you don't want the cluster's default StorageClass |
 

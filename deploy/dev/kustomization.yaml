@@ -45,6 +45,21 @@ patches:
       kind: PersistentVolumeClaim
       metadata:
         name: pool-config-data
+  # The short LAN name `pool` belongs to prod.
+  - target: {kind: IngressRoute, name: pool-short-name}
+    patch: |
+      $patch: delete
+      apiVersion: traefik.io/v1alpha1
+      kind: IngressRoute
+      metadata:
+        name: pool-short-name
+  - target: {kind: Middleware, name: pool-short-name}
+    patch: |
+      $patch: delete
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: pool-short-name
   - target: {kind: Ingress, name: pool}
     patch: |
       - op: replace
